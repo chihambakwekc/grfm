@@ -1,0 +1,137 @@
+@import "tailwindcss";
+
+:root {
+  --background: 210 18% 95%;
+  --foreground: 218 20% 28%;
+  --card: 0 0% 100%;
+  --card-foreground: 224 20% 12%;
+  --primary: 173 72% 28%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 42 88% 94%;
+  --secondary-foreground: 32 45% 24%;
+  --muted-foreground: 225 10% 42%;
+  --border: 220 16% 86%;
+  --ring: 173 72% 34%;
+}
+
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-border: hsl(var(--border));
+  --color-ring: hsl(var(--ring));
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: #eef2f5;
+  font-family: "Geist Variable", "Segoe UI", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+table {
+  table-layout: auto;
+}
+
+th,
+td {
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+::selection {
+  background: #26dcc4;
+  color: #1f2c3d;
+}
+
+::-webkit-scrollbar {
+  height: 10px;
+  width: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: #eef2f5;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border: 2px solid #eef2f5;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+.grfm-map-heartbeat-dot {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: grfm-heartbeat-dot 1.45s ease-in-out infinite;
+}
+
+.grfm-map-heartbeat-ring {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: grfm-heartbeat-ring 1.45s ease-out infinite;
+}
+
+@keyframes grfm-heartbeat-dot {
+  0%,
+  100% {
+    opacity: 0.92;
+    transform: scale(1);
+  }
+  18% {
+    opacity: 1;
+    transform: scale(1.22);
+  }
+  32% {
+    transform: scale(0.96);
+  }
+  48% {
+    transform: scale(1.12);
+  }
+}
+
+@keyframes grfm-heartbeat-ring {
+  0% {
+    opacity: 0.42;
+    transform: scale(0.75);
+  }
+  70% {
+    opacity: 0.05;
+    transform: scale(1.55);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.75);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .grfm-map-heartbeat-dot,
+  .grfm-map-heartbeat-ring {
+    animation: none;
+  }
+}
