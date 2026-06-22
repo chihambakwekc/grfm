@@ -39,6 +39,13 @@ docker compose up --build
 docker compose --env-file .env.prod -f docker-compose.prod.yml up --build -d
 ```
 
+Production host routing is configured in `nginx/default.prod.conf` only:
+
+- `https://grfm.co.zw` and `https://www.grfm.co.zw` serve the public portal.
+- `https://portal.grfm.co.zw` redirects `/` to `/login` and serves the internal/admin portal.
+
+Make sure `.env.prod` includes all production hostnames in `DJANGO_ALLOWED_HOSTS`, `DJANGO_CSRF_TRUSTED_ORIGINS`, and `CORS_ALLOWED_ORIGINS`. The local development proxy remains unchanged: public portal at `http://localhost:1516` and internal portal at `http://localhost:1516/login`.
+
 ## First backend setup
 
 ```powershell

@@ -11,6 +11,7 @@ from .views import (
     CourtViewSet,
     DistrictViewSet,
     HealthView,
+    IntakeViewSet,
     LoginView,
     MapBoundariesView,
     MapCasesView,
@@ -28,6 +29,7 @@ from .views import (
     ReportsGenerateView,
     ReportsPdfExportView,
     ReportsPowerPointExportView,
+    SyncAuditView,
     UserViewSet,
     WardViewSet,
 )
@@ -47,6 +49,7 @@ router.register("courts", CourtViewSet, basename="court")
 router.register("organizations", OrganizationViewSet, basename="organization")
 router.register("relationship-types", RelationshipTypeViewSet, basename="relationship-type")
 router.register("public-submissions", PublicSubmissionViewSet, basename="public-submission")
+router.register("intakes", IntakeViewSet, basename="intake")
 router.register("audit-logs", AuditLogViewSet, basename="audit-log")
 router.register("calendar-tasks", CalendarTaskViewSet, basename="calendar-task")
 
@@ -63,5 +66,6 @@ urlpatterns = [
     path("reports/export/excel/", ReportsExcelExportView.as_view(), name="reports-export-excel"),
     path("reports/export/pdf/", ReportsPdfExportView.as_view(), name="reports-export-pdf"),
     path("reports/export/powerpoint/", ReportsPowerPointExportView.as_view(), name="reports-export-powerpoint"),
+    path("sync/audit/", SyncAuditView.as_view(), name="sync-audit"),
     path("", include(router.urls)),
 ]

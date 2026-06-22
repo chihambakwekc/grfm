@@ -103,13 +103,13 @@ class DistrictSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = District
-        fields = ["id", "name", "code", "province", "provinceName", "status", "createdByName", "updatedByName", "created_at", "updated_at"]
+        fields = ["id", "name", "code", "province", "provinceName", "toll_free_number", "whatsapp_number", "office_address", "status", "createdByName", "updatedByName", "created_at", "updated_at"]
 
 
 class DistrictWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = District
-        fields = ["id", "province", "name", "code", "status"]
+        fields = ["id", "province", "name", "code", "toll_free_number", "whatsapp_number", "office_address", "status"]
 
     def validate_code(self, value):
         code = (value or "").strip().upper()
@@ -129,7 +129,7 @@ class ProvinceSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Province
-        fields = ["id", "name", "code", "status", "createdByName", "updatedByName", "created_at", "updated_at"]
+        fields = ["id", "name", "code", "toll_free_number", "whatsapp_number", "office_address", "status", "createdByName", "updatedByName", "created_at", "updated_at"]
 
 
 class RelationshipTypeSerializer(serializers.ModelSerializer):
@@ -715,6 +715,8 @@ class AlertSerializer(serializers.ModelSerializer):
             "concern",
             "danger",
             "submittedAt",
+            "created_at",
+            "updated_at",
             "intakeOfficer",
             "caseCategory",
             "riskLevel",
@@ -732,6 +734,7 @@ class AlertSerializer(serializers.ModelSerializer):
             "citizenFeedback",
             "timeline",
         ]
+        read_only_fields = ["created_at", "updated_at"]
 
     def get_reporterName(self, obj):
         return obj.reporter.get_full_name() or obj.reporter.username
@@ -838,6 +841,7 @@ class PublicSubmissionSerializer(serializers.ModelSerializer):
             "wardName",
             "alert",
             "alertReference",
+            "created_by",
             "reporter_name",
             "reporter_contact",
             "reporter_email",
@@ -866,7 +870,7 @@ class PublicSubmissionSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["reference", "satisfaction_score", "created_at", "updated_at"]
+        read_only_fields = ["reference", "created_by", "satisfaction_score", "created_at", "updated_at"]
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
@@ -1020,9 +1024,10 @@ class IntakeSerializer(serializers.ModelSerializer):
             "allocationDelayStatus",
             "status",
             "created_at",
+            "updated_at",
         ]
         read_only_fields = [
-            "temporary_case_reference", "created_at", "reviewed_by", "reviewed_at", "allocated_by", "allocated_at",
+            "temporary_case_reference", "created_at", "updated_at", "reviewed_by", "reviewed_at", "allocated_by", "allocated_at",
             "assessment_completed_by", "assessment_completed_at", "assessment_care_plan_submitted_by",
             "assessment_care_plan_submitted_at", "assessment_care_plan_reviewed_by", "assessment_care_plan_reviewed_at",
             "last_case_review_by", "last_case_review_at", "closure_requested_by", "closure_requested_at",

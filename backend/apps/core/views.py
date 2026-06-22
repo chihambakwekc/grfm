@@ -12,7 +12,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.http import HttpResponse
 from django.utils import timezone
-from django.utils.dateparse import parse_date
+from django.utils.dateparse import parse_date, parse_datetime
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
@@ -377,8 +377,91 @@ def audit(user, action, target, metadata=None):
     )
 
 
+def sync_request_id(request):
+    return request.headers.get("X-GRFM-Sync-Request", "").strip()
+
+
+def log_sync_audit(request, action, target_type, target_reference, metadata=None):
+    AuditLog.objects.create(
+        actor=request.user if request.user.is_authenticated else None,
+        action=action,
+        target_type=target_type,
+        target_reference=str(target_reference or ""),
+        metadata={
+            "client_request_id": sync_request_id(request),
+            **(metadata or {}),
+        },
+    )
+
+
+def sync_conflict_response(request, obj):
+    base_updated_at = request.headers.get("X-GRFM-Base-Updated-At", "").strip()
+    current_updated_at = getattr(obj, "updated_at", None)
+    if not base_updated_at or not current_updated_at:
+        return None
+    parsed_base = parse_datetime(base_updated_at)
+    if parsed_base is None:
+        return None
+    if timezone.is_naive(parsed_base):
+        parsed_base = timezone.make_aware(parsed_base, timezone.get_current_timezone())
+    if current_updated_at > parsed_base:
+        log_sync_audit(
+            request,
+            "Offline sync conflict",
+            obj.__class__.__name__,
+            getattr(obj, "reference", None) or getattr(obj, "temporary_case_reference", None) or obj.pk,
+            {
+                "path": request.path,
+                "base_updated_at": parsed_base.isoformat(),
+                "server_updated_at": current_updated_at.isoformat(),
+            },
+        )
+        return Response(
+            {
+                "detail": "This record changed on the server while the client was offline.",
+                "server_updated_at": current_updated_at.isoformat(),
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+    return None
+
+
+class OfflineSyncConflictMixin:
+    def update(self, request, *args, **kwargs):
+        conflict = sync_conflict_response(request, self.get_object())
+        if conflict:
+            return conflict
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        conflict = sync_conflict_response(request, self.get_object())
+        if conflict:
+            return conflict
+        return super().destroy(request, *args, **kwargs)
+
+
 def user_name(user):
     return user.get_full_name() or user.username
+
+
+def assigned_text_matches_user(value, user):
+    assigned = str(value or "").strip().casefold()
+    if not assigned:
+        return False
+    name = user_name(user).casefold()
+    username = user.username.casefold()
+    user_id = str(user.id).casefold()
+    first_name = (user.first_name or "").casefold()
+    last_name = (user.last_name or "").casefold()
+    return (
+        assigned == name
+        or assigned == username
+        or assigned == user_id
+        or assigned.startswith(f"{user_id}|")
+        or (name and name in assigned)
+        or (username and username in assigned)
+        or bool(first_name and last_name and first_name in assigned and last_name in assigned)
+    )
 
 
 def geojson_dir():
@@ -504,7 +587,10 @@ def scoped_map_public_submissions(user):
             return qs.filter(district=user.profile.district)
         return qs.filter(district__province=user.profile.province) if user.profile.province_id else qs.none()
     if has_role(user, {UserProfile.Role.DSDO}):
-        return qs.filter(district=user.profile.district) if user.profile.district_id else qs.none()
+        if not user.profile.district_id:
+            return qs.none()
+        district_qs = qs.filter(district=user.profile.district)
+        return [submission for submission in district_qs if assigned_text_matches_user((submission.metadata or {}).get("assignedTo"), user)]
     return qs.none()
 
 
@@ -676,7 +762,7 @@ def map_case_from_public_submission(submission):
         "longitude": lng,
         "priority": submission.priority or ("Critical" if emergency else "Medium"),
         "status": grfm_case_status(submission.status),
-        "assigned_to": "Unassigned",
+        "assigned_to": (submission.metadata or {}).get("assignedTo") or "Unassigned",
         "submitted_at": submission.created_at,
         "submitted_at_display": timezone.localtime(submission.created_at).strftime("%d %b %Y %H:%M") if submission.created_at else "",
         "emergency": emergency,
@@ -1687,7 +1773,7 @@ class RelationshipTypeViewSet(SystemAdminSetupMixin, viewsets.ModelViewSet):
         return qs
 
 
-class PublicSubmissionViewSet(viewsets.ModelViewSet):
+class PublicSubmissionViewSet(OfflineSyncConflictMixin, viewsets.ModelViewSet):
     serializer_class = PublicSubmissionSerializer
     lookup_field = "reference"
     queryset = PublicSubmission.objects.select_related("district", "district__province", "ward", "alert").all()
@@ -1712,6 +1798,8 @@ class PublicSubmissionViewSet(viewsets.ModelViewSet):
                 qs = qs.none()
         elif has_role(user, PROVINCIAL_ROLES):
             qs = qs.filter(district__province=user.profile.province) if user.profile.province_id else qs.none()
+        elif has_role(user, EXTERNAL_ROLES):
+            qs = qs.filter(created_by=user)
         elif not has_role(user, NATIONAL_ROLES):
             qs = qs.none()
         if submission_type:
@@ -1731,7 +1819,8 @@ class PublicSubmissionViewSet(viewsets.ModelViewSet):
         return qs
 
     def perform_create(self, serializer):
-        submission = serializer.save()
+        created_by = self.request.user if self.request.user.is_authenticated else None
+        submission = serializer.save(created_by=created_by)
         submission_route = {
             PublicSubmission.SubmissionType.COMPLAINT: "complaints",
             PublicSubmission.SubmissionType.ABUSE: "abuse-reports",
@@ -1770,7 +1859,7 @@ class PublicSubmissionViewSet(viewsets.ModelViewSet):
         submission = self.get_object()
         if not has_role(request.user, DISTRICT_CASE_ROLES | NATIONAL_ROLES | PROVINCIAL_ROLES):
             return Response({"detail": "You do not have permission to classify public submissions."}, status=status.HTTP_403_FORBIDDEN)
-        allowed_fields = {"category", "priority", "status", "title", "description", "metadata"}
+        allowed_fields = {"category", "priority", "programme", "status", "title", "description", "metadata"}
         updates = {key: request.data[key] for key in allowed_fields if key in request.data}
         for key, value in updates.items():
             setattr(submission, key, value)
@@ -1779,7 +1868,7 @@ class PublicSubmissionViewSet(viewsets.ModelViewSet):
         return Response(PublicSubmissionSerializer(submission, context={"request": request}).data)
 
 
-class AlertViewSet(viewsets.ModelViewSet):
+class AlertViewSet(OfflineSyncConflictMixin, viewsets.ModelViewSet):
     serializer_class = AlertSerializer
     lookup_field = "reference"
     queryset = Alert.objects.select_related("reporter", "reporter__profile", "district", "ward", "assigned_intake_officer").prefetch_related(
@@ -2206,7 +2295,7 @@ class AlertViewSet(viewsets.ModelViewSet):
         audit(request.user, "More information submitted", alert)
         return Response(AlertSerializer(alert, context={"request": request}).data)
 
-class IntakeViewSet(viewsets.ModelViewSet):
+class IntakeViewSet(OfflineSyncConflictMixin, viewsets.ModelViewSet):
     serializer_class = IntakeSerializer
     queryset = Intake.objects.select_related("alert", "allocated_officer", "allocated_by", "reviewed_by", "created_by").all()
 
@@ -2775,6 +2864,30 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         if has_role(self.request.user, {UserProfile.Role.SYS_ADMIN}):
             return self.queryset
         return AuditLog.objects.none()
+
+
+class SyncAuditView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        client_request_id = str(request.data.get("client_request_id", "")).strip()
+        outcome = str(request.data.get("outcome", "")).strip() or "unknown"
+        path = str(request.data.get("path", "")).strip()
+        method = str(request.data.get("method", "")).strip().upper()
+        AuditLog.objects.create(
+            actor=request.user,
+            action=f"Offline sync {outcome}",
+            target_type="OfflineSync",
+            target_reference=client_request_id or path or "unknown",
+            metadata={
+                "client_request_id": client_request_id,
+                "method": method,
+                "path": path,
+                "attempts": request.data.get("attempts", 0),
+                "detail": request.data.get("detail", ""),
+            },
+        )
+        return Response({"logged": True})
 
 
 class CalendarTaskViewSet(viewsets.ModelViewSet):

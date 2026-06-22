@@ -12,6 +12,7 @@ import {
   ChevronRight,
   ClipboardCheck,
   Clock3,
+  Camera,
   Globe2,
   Database,
   Eye,
@@ -67,7 +68,7 @@ import {
 import ReactECharts from "echarts-for-react"
 import { useTranslation } from "react-i18next"
 import type { ElementType, ReactNode } from "react"
-import { useEffect, useRef, useState } from "react"
+import { Fragment, useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import { geoJSON } from "leaflet"
 import type { LatLngBoundsExpression } from "leaflet"
@@ -210,6 +211,7 @@ type PublicSubmissionRecord = {
   wardName?: string
   alert?: string | number | null
   alertReference?: string | null
+  created_by?: number | null
   reporter_name?: string
   reporter_contact?: string
   reporter_email?: string
@@ -704,6 +706,11 @@ function submissionAssignedToUser(submission: PublicSubmissionRecord, user: ApiU
   return assignedTextMatchesUser(String(submission.metadata?.assignedTo || ""), user)
 }
 
+function publicSubmissionAssigned(submission: PublicSubmissionRecord) {
+  const assigned = String(submission.metadata?.assignedTo || "").trim()
+  return Boolean(assigned && !/^unassigned$/i.test(assigned))
+}
+
 function sameOfficer(caseRecord: CaseRecord, user: ApiUser) {
   return assignedTextMatchesUser(caseRecord.allocatedOfficer || "", user)
 }
@@ -729,6 +736,32 @@ function assignedTextMatchesUser(value: string | undefined, user: ApiUser) {
 
 function alertAssignedToUser(alert: AlertRecord, user: ApiUser) {
   return [alert.allocatedOfficer, alert.intakeOfficer].some((value) => assignedTextMatchesUser(value, user))
+}
+
+function alertAssigned(alert: AlertRecord) {
+  return [alert.allocatedOfficer, alert.intakeOfficer].some((value) => {
+    const assigned = String(value || "").trim()
+    return Boolean(assigned && !/^unassigned$/i.test(assigned))
+  })
+}
+
+function alertEscalationLevel(alert: AlertRecord) {
+  const latestEscalation = [...(alert.escalations || [])].reverse().find((item) => item && (item.level || item.escalated_to))
+  return String(latestEscalation?.level || latestEscalation?.escalated_to || alert.escalation_level || "")
+}
+
+function alertEscalatedToProvince(alert: AlertRecord) {
+  return /provinc/i.test(alertEscalationLevel(alert))
+}
+
+function alertEscalatedToNational(alert: AlertRecord) {
+  return /national/i.test(alertEscalationLevel(alert))
+}
+
+function userCanActOnEscalatedAlert(alert: AlertRecord, user: ApiUser) {
+  if (user.profile.role === "PROVINCIAL_HEAD") return alertEscalatedToProvince(alert)
+  if (["NATIONAL", "NATIONAL_PROGRAM"].includes(user.profile.role)) return alertEscalatedToNational(alert)
+  return false
 }
 
 function districtScopedRecordVisible(district: string, user: ApiUser) {
@@ -904,6 +937,9 @@ type DistrictOption = {
   code: string
   province: number
   provinceName: string
+  toll_free_number?: string
+  whatsapp_number?: string
+  office_address?: string
   status?: string
   createdByName?: string
   updatedByName?: string
@@ -930,11 +966,31 @@ type ProvinceOption = {
   id: number
   name: string
   code?: string
+  toll_free_number?: string
+  whatsapp_number?: string
+  office_address?: string
   status?: string
   createdByName?: string
   updatedByName?: string
   created_at?: string
   updated_at?: string
+}
+
+function phoneHref(value?: string) {
+  const cleaned = (value || "").replace(/[^\d+]/g, "")
+  return cleaned ? `tel:${cleaned}` : ""
+}
+
+function whatsappHref(value?: string) {
+  let digits = (value || "").replace(/\D/g, "")
+  if (digits.startsWith("00")) digits = digits.slice(2)
+  if (digits.startsWith("0")) digits = `263${digits.slice(1)}`
+  return digits ? `https://wa.me/${digits}` : ""
+}
+
+function districtForPublicUser(user: ApiUser | null, districts: DistrictOption[]) {
+  if (!user?.profile?.district) return null
+  return districts.find((district) => district.id === user.profile.district) || null
 }
 
 type SetupRecord = {
@@ -948,6 +1004,9 @@ type SetupRecord = {
   name?: string
   code?: string
   description?: string
+  toll_free_number?: string
+  whatsapp_number?: string
+  office_address?: string
   status?: string
   createdByName?: string
   updatedByName?: string
@@ -1097,7 +1156,7 @@ const inputClass =
   "h-11 w-full rounded-md border border-[#d8dee8] bg-white px-3 text-sm text-[#23364f] outline-none transition focus:border-[#008c7a] focus:ring-4 focus:ring-[#008c7a]/15"
 
 function isAdminPortalHost() {
-  return window.location.hostname === "childprotection.co.zw"
+  return window.location.hostname === "portal.grfm.co.zw"
 }
 
 function initialPortal(): Portal {
@@ -1178,10 +1237,10 @@ export function App() {
     const currentUserAccount = user
     async function loadReferenceData() {
       try {
-        const { districtData } = await refreshReferenceData()
+        await refreshReferenceData()
+        await refreshPublicSubmissions()
         if (currentUserAccount.profile.portal === "internal") {
           await refreshIntakes()
-          await refreshPublicSubmissions()
         }
       } catch {
         setProvinces([])
@@ -1197,10 +1256,10 @@ export function App() {
   useEffect(() => {
     if (!user) return
     async function loadOperationalData() {
-      const loadedAlerts = await refreshAlerts()
+      await refreshAlerts()
+      await refreshPublicSubmissions()
       if (user?.profile.portal === "internal") {
         await refreshIntakes()
-        await refreshPublicSubmissions()
         await refreshNotifications()
       }
     }
@@ -1255,7 +1314,7 @@ export function App() {
   }
 
   async function refreshPublicSubmissions() {
-    if (!user || user.profile.portal !== "internal") {
+    if (!user) {
       setPublicSubmissions([])
       return [] as PublicSubmissionRecord[]
     }
@@ -1616,21 +1675,254 @@ function OfflineStatus({ online, pendingSync }: { online: boolean; pendingSync: 
   )
 }
 
+function PublicNeedHelpFloating({ user, districts, onOpenLocations }: { user: ApiUser | null; districts: DistrictOption[]; onOpenLocations: () => void }) {
+  const { t } = useTranslation()
+  const [helpOpen, setHelpOpen] = useState(false)
+  const [helpMessage, setHelpMessage] = useState("")
+  const [aiOpen, setAiOpen] = useState(false)
+  const [aiInput, setAiInput] = useState("")
+  const [aiMessages, setAiMessages] = useState<Array<{ role: "assistant" | "user"; text: string }>>([
+    { role: "assistant", text: t("home.aiWelcome") },
+  ])
+  const userDistrict = districtForPublicUser(user, districts)
+  const tollFreeHref = phoneHref(userDistrict?.toll_free_number)
+  const whatsappUrl = whatsappHref(userDistrict?.whatsapp_number)
+  const districtLabel = userDistrict?.name || user?.profile.districtName || t("home.yourDistrict")
+  function requireDistrictContact(value: string, missingMessage: string, onReady: () => void) {
+    if (!userDistrict) {
+      setHelpMessage(t("home.noDistrictSupport"))
+      return
+    }
+    if (!value) {
+      setHelpMessage(missingMessage)
+      return
+    }
+    setHelpMessage("")
+    onReady()
+  }
+
+  function callDistrictOffice() {
+    requireDistrictContact(tollFreeHref, t("home.noTollFree", { district: districtLabel }), () => {
+      window.location.href = tollFreeHref
+    })
+  }
+
+  function openDistrictWhatsApp() {
+    requireDistrictContact(whatsappUrl, t("home.noWhatsApp", { district: districtLabel }), () => {
+      window.open(whatsappUrl, "_blank", "noopener,noreferrer")
+    })
+  }
+
+  function showDistrictOffice() {
+    setHelpOpen(false)
+    setHelpMessage("")
+    onOpenLocations()
+  }
+
+  function openAiAssistance() {
+    setHelpOpen(false)
+    setAiOpen(true)
+  }
+
+  function submitAiQuestion(question = aiInput) {
+    const trimmed = question.trim()
+    if (!trimmed) return
+    setAiMessages((messages) => [
+      ...messages,
+      { role: "user", text: trimmed },
+      { role: "assistant", text: t("home.aiGuidanceResponse") },
+    ])
+    setAiInput("")
+  }
+
+  return (
+    <div className="fixed bottom-5 right-5 z-40">
+      {aiOpen && (
+        <div className="fixed bottom-5 left-3 right-3 z-50 sm:left-auto sm:right-5">
+          <div className="ml-auto flex h-[min(460px,calc(100vh-2.5rem))] w-full max-w-[425px] flex-col overflow-hidden rounded-2xl border border-[#b8e6c4] bg-white text-[#0f172a] shadow-[0_24px_60px_rgba(15,23,42,0.24)]">
+            <div className="bg-[#00a33d] px-4 py-3 text-white">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-3">
+                  <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-white"><MessageSquareMore className="h-6 w-6" /></span>
+                  <div>
+                    <h3 className="text-lg font-extrabold leading-6">{t("home.aiAssistance")}</h3>
+                    <p className="text-xs font-semibold leading-4 text-white/85">{t("home.aiSubtitle")}</p>
+                  </div>
+                </div>
+                <button className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-white transition hover:bg-white/15" onClick={() => setAiOpen(false)} title={t("common.close")}><X className="h-5 w-5" /></button>
+              </div>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto bg-[#f8fafc] px-4 py-4">
+              <div className="space-y-3">
+                {aiMessages.map((message, index) => (
+                  <div key={`${message.role}-${index}`} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
+                    <div className={`max-w-[86%] rounded-xl px-4 py-3 text-sm font-medium leading-6 shadow-sm ${message.role === "user" ? "bg-[#0e7a33] text-white" : "bg-white text-[#334155] ring-1 ring-[#e5e7eb]"}`}>
+                      {message.text}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="border-t border-[#edf0f4] bg-white p-3">
+              <div className="flex gap-2">
+                <input className="min-w-0 flex-1 rounded-xl border border-[#cbd5e1] px-3 py-2 text-sm font-medium text-[#0f172a] outline-none placeholder:text-[#64748b] focus:border-[#0e7a33] focus:ring-4 focus:ring-[#0e7a33]/15" value={aiInput} onChange={(event) => setAiInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") submitAiQuestion() }} placeholder={t("home.aiInputPlaceholder")} />
+                <button className="grid h-10 w-12 shrink-0 place-items-center rounded-xl bg-[#9bd3a8] text-[#0e7a33] shadow-[0_10px_18px_rgba(14,122,51,0.16)] transition hover:bg-[#86c996]" onClick={() => submitAiQuestion()} title={t("common.send")}>
+                  <Send className="h-5 w-5" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {helpOpen && (
+        <div className="w-[min(320px,calc(100vw-40px))] rounded-2xl border border-[#d8dee8] bg-white p-4 text-[#0f172a] shadow-[0_18px_45px_rgba(15,23,42,0.18)]">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="font-extrabold">{t("home.needHelp")}</h3>
+            <button className="grid h-8 w-8 place-items-center rounded-full text-[#64748b] hover:bg-[#f1f5f9]" onClick={() => setHelpOpen(false)} title={t("common.close")}><X className="h-4 w-4" /></button>
+          </div>
+          <div className="mt-3 space-y-2 text-sm font-semibold text-[#475569]">
+            {helpMessage && <div className="rounded-xl border border-[#fde68a] bg-[#fffbeb] px-3 py-2 text-xs font-bold leading-5 text-[#92400e]">{helpMessage}</div>}
+            <button className="flex w-full items-center gap-3 rounded-xl border border-[#d8eadc] bg-[#f1f8f3] p-3 text-left transition hover:bg-[#e7f4eb]" onClick={callDistrictOffice}>
+              <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-white text-[#0e7a33] shadow-sm"><PhoneCall className="h-4 w-4" /></span>
+              {t("home.callTollFree")}
+            </button>
+            <button className="flex w-full items-center gap-3 rounded-xl border border-[#c7e7d5] bg-[#ecfdf5] p-3 text-left transition hover:bg-[#dcfce7]" onClick={openDistrictWhatsApp}>
+              <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-white text-[#16a34a] shadow-sm"><MessageSquareMore className="h-4 w-4" /></span>
+              {t("home.whatsappSupport")}
+            </button>
+            <button className="flex w-full items-center gap-3 rounded-xl border border-[#b8e6c4] bg-[#f1f8f3] p-3 text-left transition hover:bg-[#e7f4eb]" onClick={showDistrictOffice}>
+              <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-white text-[#0e7a33] shadow-sm"><MapPin className="h-4 w-4" /></span>
+              {t("home.nearestOffice")}
+            </button>
+            <button className="flex w-full items-center gap-3 rounded-xl border border-[#c7e7d5] bg-[#ecfdf5] p-3 text-left text-[#475569] transition hover:bg-[#dcfce7]" onClick={openAiAssistance}>
+              <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-white text-[#0e7a33] shadow-sm"><MessageSquareMore className="h-4 w-4" /></span>
+              {t("home.aiAssistance")}
+            </button>
+          </div>
+        </div>
+      )}
+      {!helpOpen && !aiOpen && (
+        <button className="inline-flex h-12 items-center gap-2 rounded-full bg-[#0b5d2a] px-5 text-sm font-extrabold text-white shadow-[0_14px_34px_rgba(11,93,42,0.3)] hover:bg-[#084820]" onClick={() => setHelpOpen(true)}>
+          <PhoneCall className="h-4 w-4" /> {t("home.needHelp")}
+        </button>
+      )}
+    </div>
+  )
+}
+
+function OfficeLocationCard({
+  title,
+  subtitle,
+  address,
+  tollFree,
+  whatsapp,
+  tone,
+}: {
+  title: string
+  subtitle: string
+  address?: string
+  tollFree?: string
+  whatsapp?: string
+  tone: "district" | "province"
+}) {
+  const { t } = useTranslation()
+  const isDistrict = tone === "district"
+  const accent = tone === "district" ? "#0e7a33" : "#128147"
+  const soft = tone === "district" ? "#f1f8f3" : "#eef8ef"
+  const ring = tone === "district" ? "#d8eadc" : "#c7e7d5"
+  return (
+    <article className={`overflow-hidden rounded-2xl bg-white shadow-[0_14px_34px_rgba(15,23,42,0.08)] ${isDistrict ? "border-2 border-[#9bd3a8]" : "border border-[#d8dee8]"}`}>
+      <div className={`h-1.5 ${isDistrict ? "bg-[#0e7a33]" : "bg-[#128147]"}`} />
+      <div className="flex items-start gap-4 border-b border-[#edf0f4] p-4">
+        <span className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl" style={{ backgroundColor: soft, color: accent, boxShadow: `inset 0 0 0 1px ${ring}` }}>
+          {tone === "district" ? <MapPin className="h-6 w-6" /> : <BriefcaseBusiness className="h-6 w-6" />}
+        </span>
+        <div className="min-w-0">
+          {isDistrict && <span className="mb-2 inline-flex rounded-full bg-[#e7f4eb] px-2.5 py-1 text-[11px] font-extrabold uppercase tracking-[0.1em] text-[#0e7a33]">{t("support.primaryOffice")}</span>}
+          <p className="text-xs font-extrabold uppercase tracking-[0.14em]" style={{ color: accent }}>{subtitle}</p>
+          <h3 className="mt-1 text-xl font-extrabold text-[#0f172a]">{title}</h3>
+          {isDistrict && <p className="mt-2 max-w-xl text-sm font-bold leading-5 text-[#52685d]">{t("support.districtResponsibility")}</p>}
+        </div>
+      </div>
+      <div className="space-y-3 p-4">
+        <div className="rounded-2xl border border-[#edf0f4] bg-[#fbfdfc] p-3">
+          <div className="mb-2 flex items-center gap-2 text-sm font-extrabold text-[#475569]"><MapPin className="h-4 w-4 text-[#0e7a33]" /> {t("support.officeAddress")}</div>
+          <p className="min-h-12 whitespace-pre-wrap text-base font-extrabold leading-7 text-[#0f172a]">{address || t("support.noAddress")}</p>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="rounded-2xl border border-[#edf0f4] bg-[#f8fafc] p-3">
+            <div className="mb-2 flex items-center gap-2 text-sm font-extrabold text-[#475569]"><PhoneCall className="h-4 w-4 text-[#0e7a33]" /> {t("support.tollFree")}</div>
+            <p className="text-sm font-bold text-[#0f172a]">{tollFree || t("support.notCaptured")}</p>
+          </div>
+          <div className="rounded-2xl border border-[#edf0f4] bg-[#f8fafc] p-3">
+            <div className="mb-2 flex items-center gap-2 text-sm font-extrabold text-[#475569]"><MessageSquareMore className="h-4 w-4 text-[#16a34a]" /> {t("support.whatsapp")}</div>
+            <p className="text-sm font-bold text-[#0f172a]">{whatsapp || t("support.notCaptured")}</p>
+          </div>
+        </div>
+      </div>
+    </article>
+  )
+}
+
+function PublicSupportLocations({ user, districts, provinces }: { user: ApiUser | null; districts: DistrictOption[]; provinces: ProvinceOption[] }) {
+  const { t } = useTranslation()
+  const userDistrict = districtForPublicUser(user, districts)
+  const userProvince = userDistrict ? provinces.find((province) => province.id === userDistrict.province) : user?.profile.province ? provinces.find((province) => province.id === user.profile.province) : null
+  return (
+    <div className="space-y-4 pb-10">
+      <section className="overflow-hidden rounded-[18px] border border-[#d8eadc] bg-[linear-gradient(135deg,#0e7a33_0%,#128147_55%,#16a34a_100%)] p-4 text-white shadow-[0_14px_34px_rgba(15,23,42,0.14)] sm:p-5">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div className="max-w-3xl">
+            <p className="text-xs font-extrabold uppercase tracking-[0.16em] text-white/75">{t("support.eyebrow")}</p>
+            <h2 className="mt-1 text-2xl font-extrabold leading-tight sm:text-[28px]">{t("support.title")}</h2>
+            <p className="mt-1 text-sm font-semibold leading-5 text-white/85">{t("support.subtitle")}</p>
+          </div>
+          <span className="inline-flex items-center gap-2 rounded-full bg-white/15 px-4 py-2 text-sm font-extrabold text-white ring-1 ring-white/25">
+            <Hospital className="h-4 w-4" /> {userDistrict ? t("support.showingDistrict", { district: userDistrict.name }) : userProvince ? t("support.showingProvince", { province: userProvince.name }) : t("support.locationPending")}
+          </span>
+        </div>
+      </section>
+
+      {!userDistrict && !userProvince && (
+        <div className="rounded-2xl border border-[#fde68a] bg-[#fffbeb] p-5 text-sm font-bold leading-6 text-[#92400e]">
+          {t("support.noProfileLocation")}
+        </div>
+      )}
+
+      <div className="grid gap-5 lg:grid-cols-2">
+        <OfficeLocationCard
+          title={userDistrict ? `${userDistrict.name} ${t("support.districtOffice")}` : t("support.districtUnavailable")}
+          subtitle={t("support.district")}
+          address={userDistrict?.office_address}
+          tollFree={userDistrict?.toll_free_number}
+          whatsapp={userDistrict?.whatsapp_number}
+          tone="district"
+        />
+        <OfficeLocationCard
+          title={userProvince ? `${userProvince.name} ${t("support.provinceOffice")}` : t("support.provinceUnavailable")}
+          subtitle={t("support.province")}
+          address={userProvince?.office_address}
+          tollFree={userProvince?.toll_free_number}
+          whatsapp={userProvince?.whatsapp_number}
+          tone="province"
+        />
+      </div>
+    </div>
+  )
+}
+
 function PublicHomeDashboard({
   alerts,
   publicSubmissions,
-  user,
   onStartReport,
   onTrack,
 }: {
   alerts: AlertRecord[]
   publicSubmissions: PublicSubmissionRecord[]
-  user: ApiUser | null
   onStartReport: (action: string) => void
   onTrack: () => void
 }) {
   const { t } = useTranslation()
-  const [helpOpen, setHelpOpen] = useState(false)
   const actionCards = [
     {
       title: "Register Complaint",
@@ -1763,38 +2055,6 @@ function PublicHomeDashboard({
           </div>
         </div>
       </section>
-
-      <div className="fixed bottom-5 right-5 z-40">
-        {helpOpen && (
-          <div className="mb-3 w-[min(320px,calc(100vw-40px))] rounded-2xl border border-[#d8dee8] bg-white p-4 text-[#0f172a] shadow-[0_18px_45px_rgba(15,23,42,0.18)]">
-            <div className="flex items-center justify-between gap-3">
-              <h3 className="font-extrabold">{t("home.needHelp")}</h3>
-              <button className="grid h-8 w-8 place-items-center rounded-full text-[#64748b] hover:bg-[#f1f5f9]" onClick={() => setHelpOpen(false)} title={t("common.close")}><X className="h-4 w-4" /></button>
-            </div>
-            <div className="mt-3 space-y-2 text-sm font-semibold text-[#475569]">
-              <button className="flex w-full items-center gap-3 rounded-xl border border-[#d8eadc] bg-[#f1f8f3] p-3 text-left transition hover:bg-[#e7f4eb]">
-                <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-white text-[#0e7a33] shadow-sm"><PhoneCall className="h-4 w-4" /></span>
-                {t("home.callTollFree")}
-              </button>
-              <button className="flex w-full items-center gap-3 rounded-xl border border-[#c7e7d5] bg-[#ecfdf5] p-3 text-left transition hover:bg-[#dcfce7]">
-                <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-white text-[#16a34a] shadow-sm"><MessageSquareMore className="h-4 w-4" /></span>
-                {t("home.whatsappSupport")}
-              </button>
-              <button className="flex w-full items-center gap-3 rounded-xl border border-[#bfdbfe] bg-[#eff6ff] p-3 text-left transition hover:bg-[#dbeafe]">
-                <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-white text-[#2563eb] shadow-sm"><MapPin className="h-4 w-4" /></span>
-                {t("home.nearestOffice")}
-              </button>
-              <button className="flex w-full items-center gap-3 rounded-xl border border-[#fecaca] bg-[#fef2f2] p-3 text-left transition hover:bg-[#fee2e2]">
-                <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-white text-[#dc2626] shadow-sm"><ShieldAlert className="h-4 w-4" /></span>
-                {t("home.emergencyGuidance")}
-              </button>
-            </div>
-          </div>
-        )}
-        <button className="inline-flex h-12 items-center gap-2 rounded-full bg-[#0b5d2a] px-5 text-sm font-extrabold text-white shadow-[0_14px_34px_rgba(11,93,42,0.3)] hover:bg-[#084820]" onClick={() => setHelpOpen((open) => !open)}>
-          <PhoneCall className="h-4 w-4" /> {t("home.needHelp")}
-        </button>
-      </div>
     </div>
   )
 }
@@ -1843,34 +2103,203 @@ function publicOfficeStatus(alert: AlertRecord) {
   return status || "Received at District Office"
 }
 
-function PublicTrackCases({ alerts }: { alerts: AlertRecord[] }) {
+function publicSubmissionCaseType(submission: PublicSubmissionRecord) {
+  if (submission.submission_type === "ABUSE") return "Abuse Report"
+  if (submission.submission_type === "FEEDBACK") return "General Feedback"
+  if (submission.submission_type === "VOICE") return "Voice Report"
+  return "Complaint"
+}
+
+function publicSubmissionOfficeStatus(submission: PublicSubmissionRecord) {
+  return submission.status || "Received at District Office"
+}
+
+function publicVoiceNeedsClassification(submission: PublicSubmissionRecord) {
+  return submission.submission_type === "VOICE" && (!submission.programme || !submission.category || !submission.priority)
+}
+
+function publicSubmissionProgrammeLabel(submission: PublicSubmissionRecord) {
+  return publicVoiceNeedsClassification(submission) ? "Pending" : submission.programme || "Pending"
+}
+
+function publicSubmissionCategoryLabel(submission: PublicSubmissionRecord) {
+  return publicVoiceNeedsClassification(submission) ? "Pending classification" : submission.category || "Pending"
+}
+
+function publicSubmissionPriorityLabel(submission: PublicSubmissionRecord) {
+  return publicVoiceNeedsClassification(submission) ? "Pending" : submission.priority || "Pending"
+}
+
+type PublicTrackRow = {
+  id: string
+  type: string
+  title: string
+  description: string
+  location: string
+  submittedAt: string
+  status: string
+  searchableText: string
+  alert?: AlertRecord
+  submission?: PublicSubmissionRecord
+}
+
+function PublicSubmissionReadOnlyDetails({ submission, onBack }: { submission: PublicSubmissionRecord; onBack: () => void }) {
+  const { t } = useTranslation()
+  const location = [submission.districtName || submission.district, submission.wardName || submission.ward].filter(Boolean).join(" / ") || "Pending"
+  const recordType = publicSubmissionCaseType(submission)
+  const reference = submission.id || submission.reference || "Pending reference"
+  const status = publicSubmissionOfficeStatus(submission)
+  const detailRows: Array<[string, ReactNode]> = [
+    ["Case No", reference],
+    ["Type", recordType],
+    ["Programme", publicSubmissionProgrammeLabel(submission)],
+    ["Category", publicSubmissionCategoryLabel(submission)],
+    ["Priority", publicSubmissionPriorityLabel(submission)],
+    [t("track.officeStatus"), status],
+    ["Location", location],
+    ["Submitted Date", submission.submittedAt || submission.created_at || "Pending"],
+  ]
+
+  return (
+    <div className="pb-10">
+      <section className="overflow-hidden rounded-[18px] border border-[#e5e7eb] bg-white shadow-[0_18px_44px_rgba(15,23,42,0.12)]">
+        <div className="bg-[linear-gradient(135deg,#064d2e_0%,#0e7a33_55%,#159957_100%)] px-5 py-6 text-white sm:px-7">
+          <button className="inline-flex h-12 items-center gap-2 rounded-md border border-white/25 bg-white/10 px-4 text-sm font-extrabold text-white shadow-sm transition hover:bg-white/18" onClick={onBack}>
+            <ChevronLeft className="h-4 w-4" /> Back to My Cases
+          </button>
+          <div className="mt-6 flex flex-wrap items-end justify-between gap-4">
+            <div>
+              <p className="text-xs font-extrabold uppercase tracking-wide text-white/75">{recordType} record</p>
+              <h3 className="mt-2 text-3xl font-extrabold tracking-normal text-white">{reference}</h3>
+              <p className="mt-3 text-sm font-bold text-white/88">Read-only view of the information captured from the public portal.</p>
+            </div>
+            <span className="inline-flex rounded-full bg-white px-4 py-2 text-xs font-extrabold text-[#0e7a33]">{status}</span>
+          </div>
+        </div>
+
+        <div className="px-5 py-6 sm:px-7">
+          <h4 className="text-sm font-extrabold uppercase text-[#00853b]">Submission Details</h4>
+          <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {detailRows.map(([label, value]) => (
+              <div key={label}>
+                <div className="mb-2 text-sm font-extrabold text-[#0f172a]">{label}</div>
+                <div className="min-h-14 rounded-md border border-[#cad6e2] bg-[#f8fafc] px-4 py-3 text-sm font-extrabold text-[#0f172a]">{value}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-7 grid gap-5 lg:grid-cols-2">
+            <div>
+              <div className="mb-2 text-sm font-extrabold uppercase text-[#00853b]">{t("track.description")}</div>
+              <div className="min-h-[220px] rounded-md border border-[#d8dee8] bg-white p-4">
+                <p className="whitespace-pre-wrap text-sm font-semibold leading-7 text-[#263747]">{submission.description || "No description captured."}</p>
+              </div>
+            </div>
+            <div>
+              <div className="mb-2 text-sm font-extrabold uppercase text-[#00853b]">Voice Recording</div>
+              <div className="min-h-[220px] rounded-md border border-[#d8dee8] bg-white p-4">
+                {submission.audio_data_url ? (
+                  <audio className="w-full" controls src={submission.audio_data_url} />
+                ) : (
+                  <p className="text-sm font-semibold text-[#64748b]">No voice recording is attached to this report.</p>
+                )}
+                {submission.transcript && <p className="mt-5 whitespace-pre-wrap rounded-md bg-[#f8fafc] p-4 text-sm font-semibold leading-7 text-[#263747]">{submission.transcript}</p>}
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function PublicTrackCases({ alerts, publicSubmissions }: { alerts: AlertRecord[]; publicSubmissions: PublicSubmissionRecord[] }) {
   const { t } = useTranslation()
   const [page, setPage] = useState(1)
   const [rowsPerPage, setRowsPerPage] = useState(10)
   const [query, setQuery] = useState("")
   const [statusFilter, setStatusFilter] = useState("All")
   const [selectedAlert, setSelectedAlert] = useState<AlertRecord | null>(null)
+  const [selectedSubmission, setSelectedSubmission] = useState<PublicSubmissionRecord | null>(null)
   const normalizedQuery = query.trim().toLowerCase()
-  const statusOptions = ["All", ...Array.from(new Set(alerts.map(publicOfficeStatus).filter(Boolean))).sort()]
-  const statusFilteredAlerts = statusFilter === "All" ? alerts : alerts.filter((alert) => publicOfficeStatus(alert) === statusFilter)
-  const filteredAlerts = normalizedQuery ? statusFilteredAlerts.filter((alert) => [
-    alert.id,
-    publicCaseType(alert),
-    alert.programme,
-    alert.concern,
-    alert.caseCategory,
-    alert.description,
-    alert.district,
-    alert.ward,
-    publicOfficeStatus(alert),
-    alert.information_source_contact,
-    alert.alternative_contact,
-    alert.submittedAt,
-  ].filter(Boolean).join(" ").toLowerCase().includes(normalizedQuery)) : statusFilteredAlerts
-  const totalPages = Math.max(1, Math.ceil(filteredAlerts.length / rowsPerPage))
+  const alertReferences = new Set(alerts.map((alert) => String(alert.id)))
+  const unlinkedSubmissions = publicSubmissions.filter((submission) => {
+    const linkedReference = submission.alertReference || (typeof submission.alert === "string" ? submission.alert : "") || ""
+    return !linkedReference || !alertReferences.has(linkedReference)
+  })
+  const rows: PublicTrackRow[] = [
+    ...alerts.map((alert) => {
+      const type = publicCaseType(alert)
+      const title = alert.concern || alert.caseCategory || "Not captured"
+      const description = alert.description || "No description captured"
+      const location = [alert.district, alert.ward].filter(Boolean).join(" / ") || t("common.pending")
+      const submittedAt = alert.submittedAt || t("common.pending")
+      const status = publicOfficeStatus(alert)
+      return {
+        id: alert.id,
+        type,
+        title,
+        description,
+        location,
+        submittedAt,
+        status,
+        searchableText: [
+          alert.id,
+          type,
+          alert.programme,
+          alert.concern,
+          alert.caseCategory,
+          alert.description,
+          alert.district,
+          alert.ward,
+          status,
+          alert.information_source_contact,
+          alert.alternative_contact,
+          alert.submittedAt,
+        ].filter(Boolean).join(" "),
+        alert,
+      }
+    }),
+    ...unlinkedSubmissions.map((submission) => {
+      const type = publicSubmissionCaseType(submission)
+      const title = publicVoiceNeedsClassification(submission) ? "Pending classification" : submission.title || submission.category || submission.programme || "Not captured"
+      const description = submission.description || submission.transcript || "No description captured"
+      const location = [submission.districtName || submission.district, submission.wardName || submission.ward].filter(Boolean).join(" / ") || t("common.pending")
+      const submittedAt = submission.submittedAt || submission.created_at || t("common.pending")
+      const status = publicSubmissionOfficeStatus(submission)
+      return {
+        id: submission.id || submission.reference || "Pending reference",
+        type,
+        title,
+        description,
+        location,
+        submittedAt,
+        status,
+        searchableText: [
+          submission.id,
+          submission.reference,
+          type,
+          submission.programme,
+          submission.category,
+          submission.title,
+          submission.description,
+          submission.transcript,
+          submission.districtName,
+          submission.wardName,
+          status,
+          submittedAt,
+        ].filter(Boolean).join(" "),
+        submission,
+      }
+    }),
+  ]
+  const statusOptions = ["All", ...Array.from(new Set(rows.map((row) => row.status).filter(Boolean))).sort()]
+  const statusFilteredRows = statusFilter === "All" ? rows : rows.filter((row) => row.status === statusFilter)
+  const filteredRows = normalizedQuery ? statusFilteredRows.filter((row) => row.searchableText.toLowerCase().includes(normalizedQuery)) : statusFilteredRows
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / rowsPerPage))
   const safePage = Math.min(page, totalPages)
   const start = (safePage - 1) * rowsPerPage
-  const visibleAlerts = filteredAlerts.slice(start, start + rowsPerPage)
+  const visibleRows = filteredRows.slice(start, start + rowsPerPage)
 
   function changeRowsPerPage(value: number) {
     setRowsPerPage(value)
@@ -1878,6 +2307,7 @@ function PublicTrackCases({ alerts }: { alerts: AlertRecord[] }) {
   }
 
   if (selectedAlert) return <PublicCaseReadOnlyForm alert={selectedAlert} onBack={() => setSelectedAlert(null)} />
+  if (selectedSubmission) return <PublicSubmissionReadOnlyDetails submission={selectedSubmission} onBack={() => setSelectedSubmission(null)} />
 
   return (
     <div className="space-y-5 pb-10">
@@ -1907,35 +2337,35 @@ function PublicTrackCases({ alerts }: { alerts: AlertRecord[] }) {
               <tr className="bg-[linear-gradient(135deg,#073b2a_0%,#0e7a33_58%,#15a064_100%)] text-xs font-extrabold uppercase text-white shadow-[inset_0_-1px_0_rgba(255,255,255,0.18)]">
                 <th className="px-5 py-4">{t("track.caseNo")}</th>
                 <th className="px-5 py-4">{t("track.type")}</th>
-                <th className="px-5 py-4">Title / Category</th>
-                <th className="px-5 py-4">Description</th>
+                <th className="px-5 py-4">{t("track.titleCategory")}</th>
+                <th className="px-5 py-4">{t("track.description")}</th>
                 <th className="px-5 py-4">{t("track.location")}</th>
                 <th className="px-5 py-4">{t("track.submittedDate")}</th>
-                <th className="px-5 py-4">Office Status</th>
+                <th className="px-5 py-4">{t("track.officeStatus")}</th>
                 <th className="px-5 py-4">{t("track.lastUpdated")}</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#edf0f4]">
-              {visibleAlerts.length ? visibleAlerts.map((alert) => (
-                <tr key={alert.id} className="bg-white text-sm font-semibold text-[#334155] hover:bg-[#f8fafc]">
+              {visibleRows.length ? visibleRows.map((row) => (
+                <tr key={`${row.submission ? "submission" : "alert"}-${row.id}`} className="bg-white text-sm font-semibold text-[#334155] hover:bg-[#f8fafc]">
                   <td className="whitespace-nowrap px-5 py-4">
-                    <button className="font-extrabold text-[#0e7a33] underline-offset-4 transition hover:text-[#0b5d2a] hover:underline focus:outline-none focus:ring-4 focus:ring-[#0e7a33]/15" onClick={() => setSelectedAlert(alert)}>
-                      {alert.id || t("track.pendingReference")}
+                    <button className="font-extrabold text-[#0e7a33] underline-offset-4 transition hover:text-[#0b5d2a] hover:underline focus:outline-none focus:ring-4 focus:ring-[#0e7a33]/15" onClick={() => row.alert ? setSelectedAlert(row.alert) : row.submission && setSelectedSubmission(row.submission)}>
+                      {row.id || t("track.pendingReference")}
                     </button>
                   </td>
-                  <td className="whitespace-nowrap px-5 py-4 font-bold text-[#0f172a]">{publicCaseType(alert)}</td>
-                  <td className="whitespace-nowrap px-5 py-4">{alert.concern || alert.caseCategory || "Not captured"}</td>
+                  <td className="whitespace-nowrap px-5 py-4 font-bold text-[#0f172a]">{row.type}</td>
+                  <td className="whitespace-nowrap px-5 py-4">{row.title}</td>
                   <td className="px-5 py-4">
-                    <div className="max-w-[340px] truncate" title={alert.description || "No description captured"}>
-                      {alert.description || "No description captured"}
+                    <div className="max-w-[340px] truncate" title={row.description}>
+                      {row.description}
                     </div>
                   </td>
-                  <td className="px-5 py-4">{[alert.district, alert.ward].filter(Boolean).join(" / ") || t("common.pending")}</td>
-                  <td className="whitespace-nowrap px-5 py-4">{alert.submittedAt || t("common.pending")}</td>
+                  <td className="px-5 py-4">{row.location}</td>
+                  <td className="whitespace-nowrap px-5 py-4">{row.submittedAt}</td>
                   <td className="px-5 py-4">
-                    <span className="inline-flex whitespace-nowrap rounded-full bg-[#f1f8f3] px-3 py-1 text-xs font-extrabold text-[#0e7a33] ring-1 ring-[#d8eadc]">{publicOfficeStatus(alert)}</span>
+                    <span className="inline-flex whitespace-nowrap rounded-full bg-[#f1f8f3] px-3 py-1 text-xs font-extrabold text-[#0e7a33] ring-1 ring-[#d8eadc]">{row.status}</span>
                   </td>
-                  <td className="whitespace-nowrap px-5 py-4">{alert.submittedAt || t("common.pending")}</td>
+                  <td className="whitespace-nowrap px-5 py-4">{row.submittedAt}</td>
                 </tr>
               )) : (
                 <tr>
@@ -1950,7 +2380,7 @@ function PublicTrackCases({ alerts }: { alerts: AlertRecord[] }) {
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[#edf0f4] px-4 py-4 text-sm font-bold text-[#64748b] sm:px-5">
-          <span>{t("common.showingOf", { start: filteredAlerts.length ? start + 1 : 0, end: Math.min(start + rowsPerPage, filteredAlerts.length), total: filteredAlerts.length })}</span>
+          <span>{t("common.showingOf", { start: filteredRows.length ? start + 1 : 0, end: Math.min(start + rowsPerPage, filteredRows.length), total: filteredRows.length })}</span>
           <div className="flex flex-wrap items-center gap-2">
             <label className="flex items-center gap-2 text-sm font-bold text-[#475569]">
               {t("common.rows")}
@@ -1975,6 +2405,7 @@ function PublicTrackCases({ alerts }: { alerts: AlertRecord[] }) {
 }
 
 function PublicCaseReadOnlyForm({ alert, onBack }: { alert: AlertRecord; onBack: () => void }) {
+  const { t } = useTranslation()
   const type = publicCaseType(alert)
   const isAbuse = type.toLowerCase().includes("abuse")
   const category = alertConcerns(alert).join(", ") || alert.caseCategory || "Not captured"
@@ -2025,9 +2456,9 @@ function PublicCaseReadOnlyForm({ alert, onBack }: { alert: AlertRecord; onBack:
             <Field label="Case No" value={alert.id} />
             <Field label="Type" value={type} />
             <Field label="Programme" value={programme} />
-            <Field label="Title / Category" value={category} />
+            <Field label={t("track.titleCategory")} value={category} />
             <Field label="Submitted Date" value={alert.submittedAt} />
-            <Field label="Office Status" value={status} />
+            <Field label={t("track.officeStatus")} value={status} />
           </div>
 
           <PublicSectionTitle title={isAbuse ? "Reporter Information" : "Complainant Information"} />
@@ -2608,42 +3039,109 @@ function PublicSuccessModal({
   )
 }
 
-function PublicFileUpload({ accept = "image/*,.pdf,.doc,.docx,video/*" }: { accept?: string }) {
-  const { t } = useTranslation()
-  const [files, setFiles] = useState<File[]>([])
+type PublicUploadItem = {
+  id: string
+  file: globalThis.File
+  previewUrl?: string
+}
 
-  function previewFile(file: File) {
+function publicUploadId(file: globalThis.File) {
+  return `${file.name}-${file.size}-${file.lastModified}-${Math.random().toString(36).slice(2)}`
+}
+
+function publicUploadItemsFromFiles(files: globalThis.File[]) {
+  return files.map((file) => ({
+    id: publicUploadId(file),
+    file,
+    previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined,
+  }))
+}
+
+function PublicFileUpload({ accept = "image/*,.pdf,.doc,.docx,video/*", onFilesChange }: { accept?: string; onFilesChange?: (files: globalThis.File[]) => void }) {
+  const { t } = useTranslation()
+  const [items, setItems] = useState<PublicUploadItem[]>([])
+  const itemsRef = useRef<PublicUploadItem[]>([])
+  const files = items.map((item) => item.file)
+
+  useEffect(() => {
+    itemsRef.current = items
+  }, [items])
+
+  useEffect(() => {
+    return () => {
+      itemsRef.current.forEach((item) => {
+        if (item.previewUrl) URL.revokeObjectURL(item.previewUrl)
+      })
+    }
+  }, [])
+
+  function previewFile(file: globalThis.File) {
     const url = URL.createObjectURL(file)
     window.open(url, "_blank", "noopener,noreferrer")
     window.setTimeout(() => URL.revokeObjectURL(url), 60000)
   }
 
+  function updateItems(nextItems: PublicUploadItem[]) {
+    setItems(nextItems)
+    onFilesChange?.(nextItems.map((item) => item.file))
+  }
+
+  function addFiles(fileList: FileList | null) {
+    if (!fileList?.length) return
+    updateItems([...items, ...publicUploadItemsFromFiles(Array.from(fileList))])
+  }
+
+  function removeFile(id: string) {
+    const removed = items.find((item) => item.id === id)
+    if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl)
+    updateItems(items.filter((item) => item.id !== id))
+  }
+
   return (
     <div className="rounded-xl border border-[#d8dee8] bg-white p-3">
-      <label className="flex min-h-12 cursor-pointer flex-wrap items-center justify-between gap-3 rounded-lg bg-[#f8fafc] px-3 py-2 transition hover:bg-[#f1f8f3]">
-        <span className="inline-flex items-center gap-2 text-sm font-extrabold text-[#0e7a33]">
-          <File className="h-4 w-4" />
-          {t("upload.chooseFiles")}
-        </span>
-        <span className="max-w-full truncate text-xs font-bold text-[#64748b]">{files.length ? t("upload.filesSelected", { count: files.length }) : t("upload.noFileChosen")}</span>
-        <input className="sr-only" type="file" multiple accept={accept} onChange={(event) => setFiles(Array.from(event.target.files || []))} />
-      </label>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <label className="flex min-h-12 cursor-pointer flex-wrap items-center justify-between gap-3 rounded-lg bg-[#f8fafc] px-3 py-2 transition hover:bg-[#f1f8f3]">
+          <span className="inline-flex items-center gap-2 text-sm font-extrabold text-[#0e7a33]">
+            <File className="h-4 w-4" />
+            {t("upload.chooseFiles")}
+          </span>
+          <span className="max-w-full truncate text-xs font-bold text-[#64748b]">{files.length ? t("upload.filesSelected", { count: files.length }) : t("upload.noFileChosen")}</span>
+          <input className="sr-only" type="file" multiple accept={accept} onChange={(event) => { addFiles(event.target.files); event.currentTarget.value = "" }} />
+        </label>
+        <label className="flex min-h-12 cursor-pointer items-center justify-center gap-2 rounded-lg border border-[#bbd7c2] bg-[#f1f8f3] px-3 py-2 text-sm font-extrabold text-[#0e7a33] transition hover:border-[#0e7a33] hover:bg-[#e7f5eb]">
+          <Camera className="h-4 w-4" />
+          {t("upload.takePhoto")}
+          <input className="sr-only" type="file" accept="image/*" capture="environment" onChange={(event) => { addFiles(event.target.files); event.currentTarget.value = "" }} />
+        </label>
+      </div>
       {files.length > 0 && (
         <div className="mt-3 grid gap-2">
-          {files.map((file) => (
-            <div key={`${file.name}-${file.size}`} className="flex items-center justify-between gap-3 rounded-lg border border-[#edf0f4] bg-white px-3 py-2 text-xs font-bold text-[#475569]">
-              <span className="min-w-0 truncate">{file.name}</span>
+          {items.map((item) => (
+            <div key={item.id} className="flex items-center justify-between gap-3 rounded-lg border border-[#edf0f4] bg-white px-3 py-2 text-xs font-bold text-[#475569]">
+              <span className="flex min-w-0 items-center gap-3">
+                {item.previewUrl ? <img src={item.previewUrl} alt={t("upload.photoPreview", { name: item.file.name })} className="h-12 w-12 shrink-0 rounded-md object-cover ring-1 ring-[#d8dee8]" /> : <span className="grid h-12 w-12 shrink-0 place-items-center rounded-md bg-[#f8fafc] ring-1 ring-[#d8dee8]"><File className="h-5 w-5 text-[#64748b]" /></span>}
+                <span className="min-w-0 truncate">{item.file.name}</span>
+              </span>
               <span className="inline-flex shrink-0 items-center gap-2">
                 <button
                   type="button"
                   className="grid h-7 w-7 place-items-center rounded-full border border-[#d8dee8] bg-[#f8fafc] text-[#0e7a33] transition hover:border-[#0e7a33] hover:bg-[#f1f8f3]"
-                  onClick={() => previewFile(file)}
-                  title={t("upload.preview", { name: file.name })}
-                  aria-label={t("upload.preview", { name: file.name })}
+                  onClick={() => previewFile(item.file)}
+                  title={t("upload.preview", { name: item.file.name })}
+                  aria-label={t("upload.preview", { name: item.file.name })}
                 >
                   <Eye className="h-3.5 w-3.5" />
                 </button>
-                <span className="text-[#94a3b8]">{Math.max(1, Math.round(file.size / 1024))} KB</span>
+                <button
+                  type="button"
+                  className="grid h-7 w-7 place-items-center rounded-full border border-[#d8dee8] bg-[#f8fafc] text-[#b42318] transition hover:border-[#b42318] hover:bg-[#fff1f2]"
+                  onClick={() => removeFile(item.id)}
+                  title={t("upload.remove", { name: item.file.name })}
+                  aria-label={t("upload.remove", { name: item.file.name })}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+                <span className="text-[#94a3b8]">{Math.max(1, Math.round(item.file.size / 1024))} KB</span>
               </span>
             </div>
           ))}
@@ -2843,6 +3341,7 @@ function PublicComplaintForm({ selectedProgram, user, inputClass, textareaClass,
   const [submittedReference, setSubmittedReference] = useState("")
   const [submitting, setSubmitting] = useState(false)
   const [sectionBResetKey, setSectionBResetKey] = useState(0)
+  const [evidenceFiles, setEvidenceFiles] = useState<globalThis.File[]>([])
   const deviceLocation = useHighAccuracyLocation(true)
   const accountLocation = publicLocationFromUser(user)
   const accountLocationLocked = Boolean(accountLocation.province && accountLocation.district && accountLocation.ward)
@@ -2893,6 +3392,7 @@ function PublicComplaintForm({ selectedProgram, user, inputClass, textareaClass,
       description: "",
       householdSocialRegistry: "",
     }))
+    setEvidenceFiles([])
     setSectionBResetKey((key) => key + 1)
     window.scrollTo({ top: 0, behavior: "smooth" })
   }
@@ -2925,6 +3425,7 @@ function PublicComplaintForm({ selectedProgram, user, inputClass, textareaClass,
     setError("")
     setSubmitting(true)
     try {
+      const attachments = await Promise.all(evidenceFiles.map(async (file) => ({ name: file.name, type: file.type, url: await blobToDataUrl(file) })))
       const created = await onSubmitAlert({
         childName: "Unknown child",
         sex: "Unknown",
@@ -2950,6 +3451,7 @@ function PublicComplaintForm({ selectedProgram, user, inputClass, textareaClass,
         latitude: deviceLocation.location.latitude,
         longitude: deviceLocation.location.longitude,
         location_mismatch: false,
+        attachments,
       })
       const submission = await onSubmitPublicSubmission({
         submission_type: "COMPLAINT",
@@ -3002,7 +3504,7 @@ function PublicComplaintForm({ selectedProgram, user, inputClass, textareaClass,
         <PublicFormField label={t("form.complaintCategory")} required><select className={inputClass} value={form.category} onChange={(event) => setValue("category", event.target.value)}>{categories.map((category) => <option key={category}>{category}</option>)}</select></PublicFormField>
         <PublicFormField label={t("form.dateIncident")}><input className={inputClass} type="date" value={form.incidentDate} onChange={(event) => setValue("incidentDate", event.target.value)} /></PublicFormField>
         <PublicFormField label={t("form.location")}><input className={inputClass} value={form.location} onChange={(event) => setValue("location", event.target.value)} /></PublicFormField>
-        <PublicFormField label={t("form.uploadEvidence")}><PublicFileUpload key={`complaint-files-${sectionBResetKey}`} /></PublicFormField>
+        <PublicFormField label={t("form.uploadEvidence")}><PublicFileUpload key={`complaint-files-${sectionBResetKey}`} onFilesChange={setEvidenceFiles} /></PublicFormField>
         <PublicFormField label={t("form.voiceRecordingOptional")}><PublicInlineVoiceRecorder key={`complaint-voice-${sectionBResetKey}`} /></PublicFormField>
       </div>
       <PublicFormField label={t("form.complaintDescription")} required><textarea className={textareaClass} maxLength={2000} value={form.description} onChange={(event) => setValue("description", event.target.value)} placeholder={t("form.complaintDescriptionPlaceholder")} /></PublicFormField>
@@ -3020,6 +3522,7 @@ function PublicAbuseForm({ selectedProgram, user, inputClass, textareaClass, pro
   const [error, setError] = useState("")
   const [submittedReference, setSubmittedReference] = useState("")
   const [submitting, setSubmitting] = useState(false)
+  const [evidenceFiles, setEvidenceFiles] = useState<globalThis.File[]>([])
   const deviceLocation = useHighAccuracyLocation(true)
   const accountLocation = publicLocationFromUser(user)
   const accountLocationLocked = Boolean(accountLocation.province && accountLocation.district && accountLocation.ward)
@@ -3079,6 +3582,7 @@ function PublicAbuseForm({ selectedProgram, user, inputClass, textareaClass, pro
     setError("")
     setSubmitting(true)
     try {
+      const attachments = await Promise.all(evidenceFiles.map(async (file) => ({ name: file.name, type: file.type, url: await blobToDataUrl(file) })))
       const created = await onSubmitAlert({
         childName: form.victimName || "Unknown child",
         sex: form.gender || "Unknown",
@@ -3107,6 +3611,7 @@ function PublicAbuseForm({ selectedProgram, user, inputClass, textareaClass, pro
         latitude: deviceLocation.location.latitude,
         longitude: deviceLocation.location.longitude,
         location_mismatch: false,
+        attachments,
       })
       const submission = await onSubmitPublicSubmission({
         submission_type: "ABUSE",
@@ -3178,7 +3683,7 @@ function PublicAbuseForm({ selectedProgram, user, inputClass, textareaClass, pro
       </div>
       <PublicFormField label={t("form.incidentDescription")} required><textarea className={textareaClass} value={form.description} onChange={(event) => setValue("description", event.target.value)} /></PublicFormField>
       <div className="grid grid-cols-2 gap-4">
-        <PublicFormField label={t("form.evidence")}><PublicFileUpload /></PublicFormField>
+        <PublicFormField label={t("form.evidence")}><PublicFileUpload onFilesChange={setEvidenceFiles} /></PublicFormField>
         <PublicFormField label={t("form.voiceRecording")}><PublicInlineVoiceRecorder /></PublicFormField>
       </div>
       <button className="block h-12 rounded-xl bg-[#0e7a33] px-6 text-sm font-extrabold text-white hover:bg-[#0b5d2a] disabled:opacity-50" disabled={submitting} onClick={submitAbuse}>{submitting ? t("common.submitting") : t("form.submitAbuse")}</button>
@@ -3221,7 +3726,6 @@ function PublicVoiceForm({ selectedProgram, user, showLocationFields, provinces,
   const [submittedReference, setSubmittedReference] = useState("")
   const [micStatus, setMicStatus] = useState<"ready" | "not-detected">(() => typeof navigator !== "undefined" && Boolean(navigator.mediaDevices) && typeof MediaRecorder !== "undefined" ? "ready" : "not-detected")
   const [transcript, setTranscript] = useState("")
-  const [priority, setPriority] = useState("Medium")
   const [submitting, setSubmitting] = useState(false)
   const [transcriptEditing, setTranscriptEditing] = useState(false)
   const [transcriptConfirmed, setTranscriptConfirmed] = useState(false)
@@ -3395,14 +3899,13 @@ function PublicVoiceForm({ selectedProgram, user, showLocationFields, provinces,
       const audioBlob = new Blob(audioChunksRef.current, { type: recorderRef.current?.mimeType || "audio/webm" })
       const created = await onSubmitPublicSubmission({
         submission_type: "VOICE",
-        programme: selectedProgram.name,
+        programme: "",
         district: submissionDistrict,
         ward: submissionWard,
         anonymous: true,
-        category: transcript.toLowerCase().includes("abuse") || transcript.toLowerCase().includes("harm") ? "Abuse" : transcript.toLowerCase().includes("feedback") ? "Feedback" : "Complaint",
-        priority,
+        category: "",
         status: "Submitted",
-        title: `${selectedProgram.name} voice report`,
+        title: "",
         description: transcript,
         transcript,
         audio_data_url: await blobToDataUrl(audioBlob),
@@ -3509,12 +4012,6 @@ function PublicVoiceForm({ selectedProgram, user, showLocationFields, provinces,
         </div>
 
         <div className="mt-5 grid gap-3 sm:grid-cols-3">
-          <label className="grid gap-2 text-left sm:col-span-3">
-            <span className="text-sm font-extrabold text-[#263747]">{t("form.priority")}</span>
-            <select className="h-11 w-full rounded-xl border border-[#d8dee8] bg-white px-3 text-sm font-semibold text-[#0f172a] outline-none transition focus:border-[#0e7a33] focus:ring-4 focus:ring-[#0e7a33]/15" value={priority} onChange={(event) => setPriority(event.target.value)}>
-              {publicPriorityOptions.map((item) => <option key={item}>{item}</option>)}
-            </select>
-          </label>
           <button type="button" className="inline-flex h-12 items-center justify-center gap-2 rounded-xl border border-[#f4b4ac] bg-white px-4 text-sm font-extrabold text-[#b42318] disabled:cursor-not-allowed disabled:opacity-40" disabled={!audioUrl} onClick={discardRecording}><Trash2 className="h-4 w-4" /> {t("voice.deleteRecording")}</button>
           <button type="button" className="inline-flex h-12 items-center justify-center gap-2 rounded-xl border border-[#d8dee8] bg-white px-4 text-sm font-extrabold text-[#263747] hover:border-[#0e7a33] hover:text-[#0e7a33]" onClick={startRecording}><RotateCcw className="h-4 w-4" /> {t("voice.recordAgain")}</button>
           <button type="button" className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-[#0e7a33] px-5 text-sm font-extrabold text-white hover:bg-[#0b5d2a] disabled:cursor-not-allowed disabled:opacity-45" disabled={!audioUrl || submitting} onClick={submitVoiceReport}><Send className="h-4 w-4" /> {submitting ? t("common.submitting") : t("voice.submitReport")}</button>
@@ -3816,7 +4313,7 @@ function ExternalPortal({
             <button className={navButtonClass("dashboard")} onClick={() => setView("dashboard")}>{t("nav.home")}</button>
             <button className={navButtonClass("track-cases")} onClick={() => setView("track-cases")}>{t("nav.trackCase")}</button>
             <button className="h-10 rounded-full px-3 text-sm font-extrabold text-[#475569] hover:bg-[#f1f8f3] hover:text-[#0e7a33]">{t("nav.learn")}</button>
-            <button className="h-10 rounded-full px-3 text-sm font-extrabold text-[#475569] hover:bg-[#f1f8f3] hover:text-[#0e7a33]">{t("nav.help")}</button>
+            <button className={navButtonClass("support-locations")} onClick={() => setView("support-locations")}>{t("nav.help")}</button>
           </nav>
           <div className="col-span-2 row-start-2 justify-self-start sm:col-span-1 sm:col-start-2 sm:row-start-1 sm:mr-3 sm:justify-self-center xl:hidden">
             <PublicLanguageSwitch value={selectedLanguage} onChange={changePublicLanguage} size="nav" className="shrink-0" />
@@ -3853,23 +4350,25 @@ function ExternalPortal({
               <button className={mobileNavButtonClass("dashboard")} onClick={() => { setView("dashboard"); setMobileNavOpen(false) }}>{t("nav.home")}</button>
               <button className={mobileNavButtonClass("track-cases")} onClick={() => { setView("track-cases"); setMobileNavOpen(false) }}>{t("nav.trackCase")}</button>
               <button className="h-10 rounded-lg bg-[#f8fafc] text-sm font-extrabold text-[#475569]" onClick={() => setMobileNavOpen(false)}>{t("nav.learn")}</button>
-              <button className="h-10 rounded-lg bg-[#f8fafc] text-sm font-extrabold text-[#475569]" onClick={() => setMobileNavOpen(false)}>{t("nav.help")}</button>
+              <button className={mobileNavButtonClass("support-locations")} onClick={() => { setView("support-locations"); setMobileNavOpen(false) }}>{t("nav.help")}</button>
             </nav>
           )}
         </div>
       </header>
       <section className="mx-auto min-w-0 max-w-7xl space-y-5 px-3 pb-3 pt-4 sm:px-4 sm:pb-4 sm:pt-6">
         {apiError && <ErrorBanner message={apiError} />}
-        {view !== "dashboard" && view !== "track-cases" && (
+        {view !== "dashboard" && view !== "track-cases" && view !== "support-locations" && (
           <button className="inline-flex h-10 items-center gap-2 rounded-md border border-[#d8dee8] bg-white px-3 text-sm font-extrabold text-[#0e7a33] shadow-sm" onClick={() => setView("dashboard")}>
             <ChevronLeft className="h-4 w-4" /> Dashboard
           </button>
         )}
-        {view === "dashboard" && <PublicHomeDashboard alerts={alerts} publicSubmissions={publicSubmissions} user={user} onStartReport={(action) => { setSelectedPublicAction(action); setView("public-action") }} onTrack={() => setView("track-cases")} />}
-        {view === "track-cases" && <PublicTrackCases alerts={alerts} />}
+        {view === "dashboard" && <PublicHomeDashboard alerts={alerts} publicSubmissions={publicSubmissions} onStartReport={(action) => { setSelectedPublicAction(action); setView("public-action") }} onTrack={() => setView("track-cases")} />}
+        {view === "track-cases" && <PublicTrackCases alerts={alerts} publicSubmissions={publicSubmissions} />}
+        {view === "support-locations" && <PublicSupportLocations user={user} districts={districts} provinces={provinces} />}
         {view === "public-action" && <PublicActionPlaceholder action={selectedPublicAction} user={user} provinces={provinces} districts={districts} wards={wards} onSubmitAlert={onSubmitAlert} onSubmitPublicSubmission={onSubmitPublicSubmission} onReturnHome={() => setView("dashboard")} />}
         {view === "profile" && user && <ProfilePanel />}
       </section>
+      <PublicNeedHelpFloating user={user} districts={districts} onOpenLocations={() => setView("support-locations")} />
       <footer className="border-t border-[#dce6df] bg-white/85 px-4 py-4 text-[#52685d]">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-center gap-x-4 gap-y-1 text-center text-sm font-semibold sm:justify-between sm:text-left">
           <div className="font-extrabold text-[#0f172a]">National GRFM System</div>
@@ -4623,10 +5122,11 @@ function AdminPortal({
             {apiError && <ErrorBanner message={apiError} />}
             {view === "dashboard" && <InternalDashboard user={user} users={users} alerts={alerts} cases={cases} publicSubmissions={publicSubmissions} calendarTasks={calendarTasks} districts={districts} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} />}
             {view === "notifications" && <Notifications notifications={workflowNotifications} onOpenNotification={openWorkflowNotification} />}
-            {view === "case-alerts" && <AdminCaseManagementPage user={user} alerts={alerts} cases={[]} publicSubmissions={publicSubmissions} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} />}
+            {view === "case-alerts" && <AdminCaseManagementPage user={user} users={users} alerts={alerts} cases={[]} publicSubmissions={publicSubmissions} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} refreshPublicSubmissions={refreshPublicSubmissions} />}
+            {view === "escalated-cases" && <AdminEscalatedCasesPage user={user} alerts={alerts} setSelectedAlertId={setSelectedAlertId} setView={setView} />}
             {view === "complaints" && <AdminComplaintsPage user={user} alerts={alerts} publicSubmissions={publicSubmissions} setSelectedAlertId={setSelectedAlertId} setView={setView} />}
             {view === "feedback" && <AdminFeedbackPage user={user} submissions={publicSubmissions} />}
-            {view === "voice-reports" && <AdminVoiceReportsPage user={user} users={users} submissions={publicSubmissions} setView={setView} />}
+            {view === "voice-reports" && <AdminVoiceReportsPage user={user} users={users} submissions={publicSubmissions} setView={setView} refreshPublicSubmissions={refreshPublicSubmissions} />}
             {view === "abuse-reports" && <AdminAbuseReportsPage user={user} alerts={alerts} setSelectedAlertId={setSelectedAlertId} setView={setView} />}
             {view === "resolved-cases" && <AdminResolvedCasesPage user={user} alerts={alerts} setSelectedAlertId={setSelectedAlertId} setView={setView} />}
             {view === "triage" && <Triage alert={selectedAlert} updateAlert={updateAlert} assignAlertFromDetail={assignAlertFromDetail} refreshAlerts={refreshAlerts} user={user} users={users} setView={setView} />}
@@ -5065,8 +5565,9 @@ function Triage({ alert, updateAlert, assignAlertFromDetail, refreshAlerts, user
   const workspaceActionsLocked = /(closed|rejected|duplicate|closure requested)/i.test(`${alert.status} ${alert.internalStatus}`)
   const canAssignFromDetail = ["DISTRICT_HEAD", "SYS_ADMIN"].includes(user.profile.role) && !supervisorActionsLocked && !/(closed|rejected|duplicate|converted|referred)/i.test(`${alert.status} ${alert.internalStatus}`)
   const canUseCaseWorkspace = user.profile.role === "DSDO" && alertAssignedToUser(alert, user) && !/(closed|rejected|duplicate)/i.test(`${alert.status} ${alert.internalStatus}`)
-  const actionsLocked = canUseCaseWorkspace ? workspaceActionsLocked : supervisorActionsLocked
-  const canOpenActions = canAssignFromDetail || canUseCaseWorkspace
+  const canUseEscalationActions = userCanActOnEscalatedAlert(alert, user) && !/(closed|rejected|duplicate)/i.test(`${alert.status} ${alert.internalStatus}`)
+  const actionsLocked = canUseEscalationActions ? false : canUseCaseWorkspace ? workspaceActionsLocked : supervisorActionsLocked
+  const canOpenActions = canAssignFromDetail || canUseCaseWorkspace || canUseEscalationActions
   const districtOfficers = assignUsers.filter((item) => item.profile.role === "DSDO" && (!alert.district || item.profile.districtName === alert.district || item.profile.provinceName === user.profile.provinceName))
   const officerOptions = districtOfficers.length ? districtOfficers : assignUsers.filter((item) => item.profile.role === "DSDO")
   const detailValue = (value?: string | null) => value || "Not captured"
@@ -5511,7 +6012,7 @@ function Triage({ alert, updateAlert, assignAlertFromDetail, refreshAlerts, user
               <section className="sticky top-24 overflow-hidden rounded-xl border border-slate-700/80 bg-[#111C2E] text-slate-100 shadow-[0_18px_40px_rgba(2,6,23,0.28)]">
                 <div className="flex items-start justify-between gap-4 border-b border-slate-700 bg-[#172235] p-5">
                   <div>
-                    <div className="text-xs font-extrabold uppercase tracking-wide text-slate-500">{canUseCaseWorkspace ? "Case workspace" : "District actions"}</div>
+                    <div className="text-xs font-extrabold uppercase tracking-wide text-slate-500">{canUseCaseWorkspace ? "Case workspace" : canUseEscalationActions ? "Escalation oversight" : "District actions"}</div>
                     <h3 className="mt-1 text-xl font-extrabold text-white">{alert.id}</h3>
                     <p className="mt-1 text-sm font-semibold text-slate-400">{grfmCaseStatus(alert.internalStatus || alert.status)} | {alert.priority || "Medium"}</p>
                   </div>
@@ -13585,6 +14086,11 @@ function AdminCommandDashboard({
     alertId?: string
     caseId?: string
   }
+  const liveFeedTime = (value: string) => {
+    const parsed = Date.parse(value.replace(" ", "T"))
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+  const pendingVoiceClassification = (submission: PublicSubmissionRecord) => submission.submission_type === "VOICE" && /submitted|received/i.test(submission.status || "Submitted")
   const dataLiveItems: AdminLiveFeedItem[] = [
     ...roleScopedAlerts.map((alert) => ({
       id: alert.id,
@@ -13601,14 +14107,16 @@ function AdminCommandDashboard({
       .map((submission) => ({
       id: submission.id,
       type: submission.submission_type === "FEEDBACK" ? "Feedback received" : submission.submission_type === "VOICE" ? "Voice report received" : submission.submission_type === "ABUSE" ? "Abuse report received" : "Complaint received",
-      programme: submission.programme || "GRFM",
+      programme: pendingVoiceClassification(submission) ? "Pending classification" : submission.programme || "GRFM",
       district: submission.districtName || String(submission.district || "National"),
       time: submission.submittedAt || submission.created_at || "Just now",
-      priority: submission.priority || (submission.submission_type === "FEEDBACK" ? "Normal" : "New"),
+      priority: pendingVoiceClassification(submission) ? "Pending" : submission.priority || (submission.submission_type === "FEEDBACK" ? "Normal" : "New"),
       status: grfmCaseStatus(submission.status || "Submitted"),
     })),
   ]
   const liveItems = dataLiveItems
+    .sort((left, right) => liveFeedTime(right.time) - liveFeedTime(left.time))
+    .slice(0, 10)
   return (
     <div className="space-y-5 text-slate-100">
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -13650,6 +14158,7 @@ function AdminCommandDashboard({
           <div className="border-b border-slate-700/80 px-4 py-4">
             <h2 className="text-lg font-extrabold text-white">Live GRFM Feed</h2>
             <p className="text-sm font-semibold text-slate-400">Latest complaints, abuse reports, voice reports and feedback.</p>
+            <p className="mt-1 text-[11px] font-bold uppercase tracking-wide text-slate-500">Showing latest {liveItems.length} of {dataLiveItems.length}</p>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto">
             {liveItems.length ? liveItems.map((item) => (
@@ -13729,21 +14238,26 @@ function AdminMapStat({ label, value }: { label: string; value: string | number 
 
 function AdminCaseManagementPage({
   user,
+  users,
   alerts,
   cases,
   publicSubmissions,
   setSelectedAlertId,
   setSelectedCaseId,
   setView,
+  refreshPublicSubmissions,
 }: {
   user: ApiUser
+  users: ApiUser[]
   alerts: AlertRecord[]
   cases: CaseRecord[]
   publicSubmissions: PublicSubmissionRecord[]
   setSelectedAlertId: (id: string) => void
   setSelectedCaseId: (id: string) => void
   setView: (view: string) => void
+  refreshPublicSubmissions: () => Promise<PublicSubmissionRecord[]>
 }) {
+  const [selectedVoiceSubmission, setSelectedVoiceSubmission] = useState<PublicSubmissionRecord | null>(null)
   const [search, setSearch] = useState("")
   const [statusFilter, setStatusFilter] = useState("New")
   const [rowsPerPage, setRowsPerPage] = useState(10)
@@ -13773,10 +14287,11 @@ function AdminCaseManagementPage({
       assignedTo: alert.intakeOfficer || alert.allocatedOfficer || "Unassigned",
       status: grfmCaseStatus(alert.internalStatus || alert.status || "Submitted"),
       received: daysSince(alert.submittedAt),
-      lastAction: alert.internalStatus || "Awaiting triage",
-      source: "alert" as const,
-      sourceId: alert.id,
-    })),
+        lastAction: alert.internalStatus || "Awaiting triage",
+        source: "alert" as const,
+        sourceId: alert.id,
+        sourceSubmission: null,
+      })),
     ...publicSubmissions
       .filter((submission) => {
         const districtName = submission.districtName || String(submission.district || "")
@@ -13790,17 +14305,18 @@ function AdminCaseManagementPage({
       .map((submission) => ({
         id: submission.reference || submission.id,
         type: publicSubmissionWorkflowType(submission),
-        programme: submission.programme || submission.category || "GRFM",
+        programme: publicVoiceNeedsClassification(submission) ? "Pending classification" : submission.programme || submission.category || "GRFM",
         district: submission.districtName || String(submission.district || "Unassigned"),
-        summary: submission.title || submission.category || submission.description || submission.transcript || "Public GRFM submission",
+        summary: publicVoiceNeedsClassification(submission) ? submission.description || submission.transcript || "Voice report awaiting classification" : submission.title || submission.category || submission.description || submission.transcript || "Public GRFM submission",
         reporter: submission.anonymous ? "Protected reporter" : submission.reporter_name || "Community",
-        priority: submission.priority || "Medium",
+        priority: publicVoiceNeedsClassification(submission) ? "Pending" : submission.priority || "Medium",
         assignedTo: String(submission.metadata?.assignedTo || "Unassigned"),
         status: grfmCaseStatus(submission.status || "Submitted"),
         received: daysSince(submission.submittedAt || submission.created_at || ""),
         lastAction: submission.status || "Awaiting review",
         source: "public" as const,
         sourceId: submission.alertReference || submission.reference || submission.id,
+        sourceSubmission: submission,
       })),
   ]
   const statusOptions = ["New", "Closure Requested"]
@@ -13817,8 +14333,14 @@ function AdminCaseManagementPage({
       setView("triage")
       return
     }
-    setView(row.type === "Voice" ? "voice-reports" : "feedback")
+    if (row.type === "Voice" && row.sourceSubmission) {
+      setSelectedVoiceSubmission(row.sourceSubmission)
+      return
+    }
+    setView("feedback")
   }
+  const selectedVoiceRow = selectedVoiceSubmission ? voiceReportRowFromSubmission(selectedVoiceSubmission) : null
+  const officers = users.filter((user) => user.profile.portal === "internal")
   return (
     <AdminOperationalPage title="GRFM Queue" subtitle="New district intake queue for complaints, abuse reports, voice records and new case submissions. Feedback is managed separately.">
       <AdminDataPanel title="New Intake Queue" count={`${filteredRows.length} new records`}>
@@ -13831,7 +14353,7 @@ function AdminCaseManagementPage({
           onFilterChange={(value) => { setStatusFilter(value); setPage(1) }}
           placeholder="Search reference, summary, programme, reporter..."
         />
-        <AdminTable headers={["Ref", "Summary", "Programme", "Reporter", "Priority", "Status", "Received", "Action"]}>
+        <AdminTable headers={["Ref", "Type", "Summary", "Programme", "Reporter", "District", "Priority", "Status", "Received", "Action"]}>
           {paginated.rows.map((row) => (
             <tr key={`${row.source}-${row.id}`} className="border-b border-slate-800/90 hover:bg-slate-800/55">
               <AdminTd strong>
@@ -13839,14 +14361,13 @@ function AdminCaseManagementPage({
                   {row.id}
                 </button>
               </AdminTd>
+              <AdminTd>{row.type}</AdminTd>
               <AdminTd>
-                <div className="max-w-[360px]">
-                  <div className="truncate font-extrabold text-slate-100">{row.summary}</div>
-                  <div className="mt-1 text-xs font-bold text-slate-500">{row.type} | {row.district}</div>
-                </div>
+                <div className="max-w-[360px] truncate font-extrabold text-slate-100" title={row.summary}>{row.summary}</div>
               </AdminTd>
               <AdminTd>{row.programme}</AdminTd>
               <AdminTd>{row.reporter}</AdminTd>
+              <AdminTd>{row.district}</AdminTd>
               <AdminTd><AdminRiskBadge value={row.priority} /></AdminTd>
               <AdminTd><AdminStatusBadge value={row.status} /></AdminTd>
               <AdminTd>{row.received}</AdminTd>
@@ -13857,7 +14378,7 @@ function AdminCaseManagementPage({
               </AdminTd>
             </tr>
           ))}
-          {!filteredRows.length && <AdminEmptyTable colSpan={8} text="No new GRFM intake records match the current search/filter." />}
+          {!filteredRows.length && <AdminEmptyTable colSpan={10} text="No new GRFM intake records match the current search/filter." />}
         </AdminTable>
         <AdminTablePagination
           totalRows={filteredRows.length}
@@ -13870,6 +14391,25 @@ function AdminCaseManagementPage({
           onPageChange={setPage}
         />
       </AdminDataPanel>
+
+      {selectedVoiceRow && (
+        <VoiceReportDetailsModal
+          selected={selectedVoiceRow}
+          officers={officers}
+          canManage={user.profile.role === "DISTRICT_HEAD"}
+          onClose={() => setSelectedVoiceSubmission(null)}
+          onSaved={async () => {
+            const refreshed = await refreshPublicSubmissions()
+            const next = refreshed.find((submission: PublicSubmissionRecord) => (submission.reference || submission.id) === selectedVoiceRow.id)
+            setSelectedVoiceSubmission(next || null)
+          }}
+          onAssigned={async () => {
+            await refreshPublicSubmissions()
+            setSelectedVoiceSubmission(null)
+          }}
+          onOpenCase={() => setSelectedVoiceSubmission(null)}
+        />
+      )}
     </AdminOperationalPage>
   )
 }
@@ -13894,6 +14434,7 @@ function AdminComplaintsPage({
   const complaintAlerts = alerts.filter((alert) => {
     if (alertWorkflowType(alert) !== "Complaint") return false
     if (!districtScopedRecordVisible(alert.district, user)) return false
+    if (!alertAssigned(alert)) return false
     if (user.profile.role === "DSDO") return alertAssignedToUser(alert, user)
     return true
   })
@@ -13901,6 +14442,7 @@ function AdminComplaintsPage({
   const rows = [
     ...complaintAlerts.map((alert, index) => ({
       id: alert.id || `CMP-${index + 1}`,
+      type: "Complaint",
       summary: alert.concern || alert.description || "Complaint received",
       programme: alert.programme || alert.caseCategory || "GRFM",
       reporter: submittedByLabel(alert),
@@ -13912,18 +14454,21 @@ function AdminComplaintsPage({
       source: "alert" as const,
       sourceId: alert.id,
       canOpen: true,
+      canAct: !["PROVINCIAL_HEAD", "NATIONAL", "NATIONAL_PROGRAM"].includes(user.profile.role) || userCanActOnEscalatedAlert(alert, user),
     })),
     ...publicSubmissions
       .filter((submission) => {
         if (publicSubmissionWorkflowType(submission) !== "Complaint") return false
         const districtName = submission.districtName || String(submission.district || "")
         if (!districtScopedRecordVisible(districtName, user)) return false
+        if (!publicSubmissionAssigned(submission)) return false
         if (user.profile.role === "DSDO" && !submissionAssignedToUser(submission, user)) return false
         const linkedReference = submission.alertReference || ""
         return !linkedReference || !complaintAlertIds.has(linkedReference)
       })
       .map((submission) => ({
         id: submission.reference || submission.id,
+        type: "Complaint",
         summary: submission.title || submission.category || submission.description || "Complaint received",
         programme: submission.programme || submission.category || "GRFM",
         reporter: submission.anonymous ? "Protected reporter" : submission.reporter_name || "Community",
@@ -13935,12 +14480,13 @@ function AdminComplaintsPage({
         source: "public" as const,
         sourceId: submission.alertReference || "",
         canOpen: Boolean(submission.alertReference),
+        canAct: false,
       })),
   ]
   const statusOptions = ["All", ...Array.from(new Set(rows.map((row) => row.status).filter(Boolean))).sort()]
   const normalizedSearch = search.trim().toLowerCase()
   const filteredRows = rows.filter((row) => {
-    const matchesSearch = !normalizedSearch || [row.id, row.summary, row.programme, row.reporter, row.district, row.priority, row.status, row.assignedTo].join(" ").toLowerCase().includes(normalizedSearch)
+    const matchesSearch = !normalizedSearch || [row.id, row.type, row.summary, row.programme, row.reporter, row.priority, row.status, row.district, row.received, row.assignedTo].join(" ").toLowerCase().includes(normalizedSearch)
     const matchesStatus = statusFilter === "All" || row.status === statusFilter
     return matchesSearch && matchesStatus
   })
@@ -13963,7 +14509,7 @@ function AdminComplaintsPage({
           onFilterChange={(value) => { setStatusFilter(value); setPage(1) }}
           placeholder="Search reference, summary, programme, reporter..."
         />
-        <AdminTable headers={["Ref", "Summary", "Programme", "Reporter", "Priority", "Status", "Received", "Assigned To", "Action"]}>
+        <AdminTable headers={["Ref", "Summary", "Type", "Programme", "Priority", "Reporter", "Status", "District", "Received", "Assigned To", "Action"]}>
           {paginated.rows.map((row) => (
             <tr key={`${row.source}-${row.id}`} className="border-b border-slate-800/90 hover:bg-slate-800/55">
               <AdminTd strong>
@@ -13976,21 +14522,22 @@ function AdminComplaintsPage({
               <AdminTd>
                 <div className="max-w-[360px]">
                   <div className="truncate font-extrabold text-slate-100">{row.summary}</div>
-                  <div className="mt-1 text-xs font-bold text-slate-500">Complaint | {row.district}</div>
                 </div>
               </AdminTd>
+              <AdminTd>{row.type}</AdminTd>
               <AdminTd>{row.programme}</AdminTd>
-              <AdminTd>{row.reporter}</AdminTd>
               <AdminTd><AdminRiskBadge value={row.priority} /></AdminTd>
+              <AdminTd>{row.reporter}</AdminTd>
               <AdminTd><AdminStatusBadge value={row.status} /></AdminTd>
+              <AdminTd>{row.district}</AdminTd>
               <AdminTd>{row.received}</AdminTd>
               <AdminTd>{row.assignedTo}</AdminTd>
               <AdminTd>
-                {row.canOpen ? <AdminIconAction label={`Open ${row.id}`} onClick={() => openComplaintRow(row)} /> : <span className="text-xs font-bold text-slate-500">No case</span>}
+                {row.canOpen ? <AdminIconAction label={row.canAct ? "Open actions" : "View only"} onClick={() => openComplaintRow(row)} /> : <span className="text-xs font-bold text-slate-500">No case</span>}
               </AdminTd>
             </tr>
           ))}
-          {!filteredRows.length && <AdminEmptyTable colSpan={9} text="No complaints match the current search/filter." />}
+          {!filteredRows.length && <AdminEmptyTable colSpan={11} text="No complaints match the current search/filter." />}
         </AdminTable>
         <AdminTablePagination
           totalRows={filteredRows.length}
@@ -14009,6 +14556,7 @@ function AdminComplaintsPage({
 
 type VoiceReportRow = {
   id: string
+  programme: string
   dateReceived: string
   duration: string
   reporter: string
@@ -14022,30 +14570,159 @@ type VoiceReportRow = {
   audioUrl?: string
 }
 
-function AdminVoiceReportsPage({ user, users, submissions, setView }: { user: ApiUser; users: ApiUser[]; submissions: PublicSubmissionRecord[]; setView: (view: string) => void }) {
-  const [selectedVoiceId, setSelectedVoiceId] = useState<string | null>(null)
-  const [search, setSearch] = useState("")
-  const [statusFilter, setStatusFilter] = useState("All")
-  const [rowsPerPage, setRowsPerPage] = useState(10)
-  const [page, setPage] = useState(1)
-  const officers = users.filter((user) => user.profile.portal === "internal")
-  const districtDsdo = users.find((item) => item.profile.role === "DSDO" && item.profile.districtName === user.profile.districtName)
-  const districtHead = users.find((item) => item.profile.role === "DISTRICT_HEAD" && item.profile.districtName === user.profile.districtName)
-  const defaultDistrictAssignee = districtDsdo?.username || districtHead?.username || "District Head"
-  const voiceRows: VoiceReportRow[] = submissions.filter((item) => item.submission_type === "VOICE").map((item) => ({
-    id: item.id,
+function voiceReportRowFromSubmission(item: PublicSubmissionRecord): VoiceReportRow {
+  const pendingClassification = publicVoiceNeedsClassification(item)
+  return {
+    id: item.reference || item.id,
+    programme: pendingClassification ? "Pending classification" : item.programme || "GRFM",
     dateReceived: item.submittedAt || item.created_at || "",
     duration: formatRecordingTime(item.audio_duration_seconds || 0),
     reporter: item.anonymous ? "Protected caller" : item.reporter_name || "Community member",
     district: item.districtName || String(item.district || ""),
     transcription: item.transcript || item.description || "",
-    suggestedCategory: item.category || "Pending classification",
-    category: item.category || "Pending",
-    priority: item.priority || "Medium",
+    suggestedCategory: pendingClassification ? "Pending classification" : item.category || "Pending classification",
+    category: pendingClassification ? "Pending" : item.category || "Pending",
+    priority: pendingClassification ? "Pending" : item.priority || "Medium",
     assignedTo: String(item.metadata?.assignedTo || "Unassigned"),
     status: item.status || "Submitted",
     audioUrl: item.audio_data_url || "",
-  }))
+  }
+}
+
+function AudioWaveform({ audioUrl, audioRef }: { audioUrl?: string; audioRef?: { current: HTMLAudioElement | null } }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const samplesRef = useRef<number[]>([])
+  const animationRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const context = canvas.getContext("2d")
+    if (!context) return
+    let cancelled = false
+
+    function currentProgress() {
+      const audio = audioRef?.current
+      if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) return 0
+      return Math.max(0, Math.min(1, audio.currentTime / audio.duration))
+    }
+
+    function drawBars(samples: number[], progress = currentProgress()) {
+      if (!canvas || !context) return
+      const width = canvas.clientWidth || 620
+      const height = canvas.clientHeight || 76
+      const ratio = window.devicePixelRatio || 1
+      canvas.width = width * ratio
+      canvas.height = height * ratio
+      context.setTransform(ratio, 0, 0, ratio, 0, 0)
+      context.clearRect(0, 0, width, height)
+      const center = height / 2
+      const barCount = Math.max(42, Math.floor(width / 9))
+      const barWidth = Math.max(2, Math.floor(width / barCount) - 4)
+      const gap = (width - barCount * barWidth) / Math.max(1, barCount - 1)
+      samples.slice(0, barCount).forEach((sample, index) => {
+        const value = Math.max(0.08, Math.min(1, sample))
+        const barHeight = Math.max(8, value * (height - 18))
+        const x = index * (barWidth + gap)
+        const y = center - barHeight / 2
+        const barProgress = (x + barWidth / 2) / width
+        context.fillStyle = barProgress <= progress ? "#22C55E" : "rgba(34,197,94,0.28)"
+        context.beginPath()
+        context.roundRect(x, y, barWidth, barHeight, barWidth / 2)
+        context.fill()
+      })
+      context.fillStyle = "#86efac"
+      context.fillRect(Math.max(0, Math.min(width - 2, progress * width)), 9, 2, height - 18)
+    }
+
+    function drawFallback() {
+      samplesRef.current = Array.from({ length: 72 }, (_, index) => 0.18 + ((index * 7) % 11) / 14)
+      drawBars(samplesRef.current)
+    }
+
+    async function decodeWaveform() {
+      if (!audioUrl) {
+        drawFallback()
+        return
+      }
+      try {
+        const response = await fetch(audioUrl)
+        const arrayBuffer = await response.arrayBuffer()
+        const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+        if (!AudioContextClass) {
+          drawFallback()
+          return
+        }
+        const audioContext = new AudioContextClass()
+        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer.slice(0))
+        const channelData = audioBuffer.getChannelData(0)
+        const barCount = Math.max(42, Math.floor((canvasRef.current?.clientWidth || 620) / 9))
+        const blockSize = Math.max(1, Math.floor(channelData.length / barCount))
+        const samples = Array.from({ length: barCount }, (_, index) => {
+          let peak = 0
+          const start = index * blockSize
+          const end = Math.min(channelData.length, start + blockSize)
+          for (let sampleIndex = start; sampleIndex < end; sampleIndex += 1) {
+            peak = Math.max(peak, Math.abs(channelData[sampleIndex]))
+          }
+          return peak
+        })
+        const max = Math.max(...samples, 0.01)
+        samplesRef.current = samples.map((sample) => sample / max)
+        if (!cancelled) drawBars(samplesRef.current)
+        void audioContext.close()
+      } catch {
+        if (!cancelled) drawFallback()
+      }
+    }
+
+    void decodeWaveform()
+    const redraw = () => drawBars(samplesRef.current.length ? samplesRef.current : Array.from({ length: 72 }, () => 0.12))
+    const animate = () => {
+      redraw()
+      if (audioRef?.current && !audioRef.current.paused && !audioRef.current.ended) {
+        animationRef.current = window.requestAnimationFrame(animate)
+      }
+    }
+    const startAnimation = () => {
+      if (animationRef.current) window.cancelAnimationFrame(animationRef.current)
+      animationRef.current = window.requestAnimationFrame(animate)
+    }
+    const stopAnimation = () => {
+      if (animationRef.current) window.cancelAnimationFrame(animationRef.current)
+      animationRef.current = null
+      redraw()
+    }
+    const audio = audioRef?.current
+    audio?.addEventListener("play", startAnimation)
+    audio?.addEventListener("pause", stopAnimation)
+    audio?.addEventListener("ended", stopAnimation)
+    audio?.addEventListener("timeupdate", redraw)
+    audio?.addEventListener("seeked", redraw)
+    const resize = () => void decodeWaveform()
+    window.addEventListener("resize", resize)
+    return () => {
+      cancelled = true
+      if (animationRef.current) window.cancelAnimationFrame(animationRef.current)
+      audio?.removeEventListener("play", startAnimation)
+      audio?.removeEventListener("pause", stopAnimation)
+      audio?.removeEventListener("ended", stopAnimation)
+      audio?.removeEventListener("timeupdate", redraw)
+      audio?.removeEventListener("seeked", redraw)
+      window.removeEventListener("resize", resize)
+    }
+  }, [audioUrl, audioRef])
+
+  return <canvas ref={canvasRef} className="h-20 w-full rounded-lg border border-slate-700 bg-[#111827]" aria-label="Audio waveform" />
+}
+
+function AdminVoiceReportsPage({ user, users, submissions, setView, refreshPublicSubmissions }: { user: ApiUser; users: ApiUser[]; submissions: PublicSubmissionRecord[]; setView: (view: string) => void; refreshPublicSubmissions: () => Promise<PublicSubmissionRecord[]> }) {
+  const [selectedVoiceId, setSelectedVoiceId] = useState<string | null>(null)
+  const [search, setSearch] = useState("")
+  const [statusFilter, setStatusFilter] = useState("All")
+  const [rowsPerPage, setRowsPerPage] = useState(10)
+  const [page, setPage] = useState(1)
+  const voiceRows: VoiceReportRow[] = submissions.filter((item) => item.submission_type === "VOICE" && publicSubmissionAssigned(item)).map(voiceReportRowFromSubmission)
   const scopedVoiceRows = voiceRows.filter((row) => {
     if (!districtScopedRecordVisible(row.district, user)) return false
     if (user.profile.role === "DSDO") return assignedTextMatchesUser(row.assignedTo, user)
@@ -14059,7 +14736,18 @@ function AdminVoiceReportsPage({ user, users, submissions, setView }: { user: Ap
     return matchesSearch && matchesStatus
   })
   const paginated = paginateAdminRows(filteredRows, page, rowsPerPage)
-  const selected = scopedVoiceRows.find((row) => row.id === selectedVoiceId) || null
+  const selectedSubmission = selectedVoiceId ? submissions.find((item) => (item.reference || item.id) === selectedVoiceId) || null : null
+
+  if (selectedSubmission) {
+    return (
+      <VoiceRecordWorkspace
+        submission={selectedSubmission}
+        user={user}
+        onBack={() => setSelectedVoiceId(null)}
+        refreshPublicSubmissions={refreshPublicSubmissions}
+      />
+    )
+  }
 
   return (
     <AdminOperationalPage title="Voice Records" subtitle={user.profile.role === "DSDO" ? "Voice records allocated to you for action." : "District voice records for classification, prioritisation and assignment."}>
@@ -14073,7 +14761,7 @@ function AdminVoiceReportsPage({ user, users, submissions, setView }: { user: Ap
           onFilterChange={(value) => { setStatusFilter(value); setPage(1) }}
           placeholder="Search voice ID, reporter, district, transcript..."
         />
-        <AdminTable headers={["Voice ID", "Date Received", "Duration", "Reporter", "District", "Transcription", "Suggested Category", "Category", "Priority", "Assigned To", "Status"]}>
+        <AdminTable headers={["Voice ID", "Date Received", "Duration", "Reporter", "Priority", "Status", "District", "Transcription", "Suggested Category", "Category", "Assigned To"]}>
           {paginated.rows.map((row) => (
             <tr key={row.id} className="border-b border-slate-800/90 hover:bg-slate-800/55">
               <AdminTd strong>
@@ -14084,13 +14772,13 @@ function AdminVoiceReportsPage({ user, users, submissions, setView }: { user: Ap
               <AdminTd>{row.dateReceived}</AdminTd>
               <AdminTd>{row.duration}</AdminTd>
               <AdminTd>{row.reporter}</AdminTd>
+              <AdminTd><AdminRiskBadge value={row.priority} /></AdminTd>
+              <AdminTd><AdminStatusBadge value={row.status} /></AdminTd>
               <AdminTd>{row.district}</AdminTd>
               <AdminTd><span className="line-clamp-2 max-w-[340px] text-slate-300">{row.transcription}</span></AdminTd>
               <AdminTd>{row.suggestedCategory}</AdminTd>
               <AdminTd>{row.category}</AdminTd>
-              <AdminTd><AdminRiskBadge value={row.priority} /></AdminTd>
               <AdminTd>{row.assignedTo}</AdminTd>
-              <AdminTd><AdminStatusBadge value={row.status} /></AdminTd>
             </tr>
           ))}
           {!filteredRows.length && <AdminEmptyTable colSpan={11} text="No voice reports match the current search/filter." />}
@@ -14106,13 +14794,268 @@ function AdminVoiceReportsPage({ user, users, submissions, setView }: { user: Ap
           onPageChange={setPage}
         />
       </AdminDataPanel>
-
-      {selected && <VoiceReportDetailsModal selected={selected} officers={officers} onClose={() => setSelectedVoiceId(null)} onOpenCase={() => { setSelectedVoiceId(null); setView("case-alerts") }} />}
     </AdminOperationalPage>
   )
 }
 
-function VoiceReportDetailsModal({ selected, officers, onClose, onOpenCase }: { selected: VoiceReportRow; officers: ApiUser[]; onClose: () => void; onOpenCase: () => void }) {
+function VoiceRecordWorkspace({ submission, user, onBack, refreshPublicSubmissions }: { submission: PublicSubmissionRecord; user: ApiUser; onBack: () => void; refreshPublicSubmissions: () => Promise<PublicSubmissionRecord[]> }) {
+  const row = voiceReportRowFromSubmission(submission)
+  const metadata = submission.metadata || {}
+  const workflow = (metadata.voiceWorkflow && typeof metadata.voiceWorkflow === "object" ? metadata.voiceWorkflow : {}) as Record<string, unknown>
+  const investigations = Array.isArray(workflow.investigations) ? workflow.investigations as Array<Record<string, unknown>> : []
+  const actions = Array.isArray(workflow.actions) ? workflow.actions as Array<Record<string, unknown>> : []
+  const referrals = Array.isArray(workflow.referrals) ? workflow.referrals as Array<Record<string, unknown>> : []
+  const resolutions = Array.isArray(workflow.resolutions) ? workflow.resolutions as Array<Record<string, unknown>> : []
+  const timeline = Array.isArray(workflow.timeline) ? workflow.timeline as Array<Record<string, unknown>> : []
+  const canManage = user.profile.role === "DSDO" && assignedTextMatchesUser(row.assignedTo, user) && !/(closed|resolved|rejected|duplicate)/i.test(row.status)
+  const [actionsOpen, setActionsOpen] = useState(false)
+  const [actionModal, setActionModal] = useState<null | "investigation" | "action" | "refer" | "resolve" | "timeline">(null)
+  const [saving, setSaving] = useState(false)
+  const [message, setMessage] = useState("")
+  const [investigationForm, setInvestigationForm] = useState({ method: "", persons_contacted: "", findings: "", internal_notes: "" })
+  const [actionForm, setActionForm] = useState({ action_type: "Phone Call Made", description: "", outcome: "In Progress", responsible_person: userDisplayName(user), next_step: "" })
+  const [referralForm, setReferralForm] = useState({ destination: "Programme Focal Person", reason: "", notes: "" })
+  const [resolutionForm, setResolutionForm] = useState({ resolution_type: "Resolved", resolution_summary: "", corrective_action: "", citizen_message: "", closure_reason: "Resolved" })
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const workflowValue = (value: unknown) => value == null || value === "" ? "Not captured" : String(value)
+  const transcriptLanguage = String(metadata.transcriptLanguage || metadata.language || "English")
+  const transcriptConfidence = String(metadata.transcriptConfidence || (metadata.transcriptConfirmed ? "98%" : "92%"))
+
+  async function appendVoiceWorkflow(kind: "investigations" | "actions" | "referrals" | "resolutions", payload: Record<string, unknown>, nextStatus = row.status) {
+    setSaving(true)
+    setMessage("")
+    const currentWorkflow = (metadata.voiceWorkflow && typeof metadata.voiceWorkflow === "object" ? metadata.voiceWorkflow : {}) as Record<string, unknown>
+    const existing = Array.isArray(currentWorkflow[kind]) ? currentWorkflow[kind] as Array<Record<string, unknown>> : []
+    const existingTimeline = Array.isArray(currentWorkflow.timeline) ? currentWorkflow.timeline as Array<Record<string, unknown>> : []
+    const entry = {
+      id: `${kind}-${Date.now()}`,
+      ...payload,
+      createdBy: userDisplayName(user),
+      createdAt: new Date().toISOString().slice(0, 16).replace("T", " "),
+    }
+    const nextWorkflow = {
+      ...currentWorkflow,
+      [kind]: [entry, ...existing],
+      timeline: [{ id: `timeline-${Date.now()}`, event_type: `Voice ${kind.slice(0, -1)} added`, description: String(payload.findings || payload.description || payload.reason || payload.resolution_summary || "Workflow updated"), userName: userDisplayName(user), createdAt: entry.createdAt }, ...existingTimeline],
+    }
+    try {
+      await apiPost(`/public-submissions/${encodeURIComponent(row.id)}/classify/`, {
+        status: nextStatus,
+        metadata: { ...metadata, assignedTo: row.assignedTo, voiceWorkflow: nextWorkflow },
+      })
+      await refreshPublicSubmissions()
+      setActionModal(null)
+      setActionsOpen(false)
+      setMessage("Voice case workspace updated.")
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not update voice case workspace.")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const DetailTile = ({ label, value }: { label: string; value: ReactNode }) => (
+    <div className="rounded-lg border border-slate-700/80 bg-slate-950/35 p-3">
+      <div className="text-[11px] font-extrabold uppercase tracking-wide text-slate-500">{label}</div>
+      <div className="mt-1 text-sm font-bold text-slate-100">{value}</div>
+    </div>
+  )
+  const WorkflowBlock = ({ title, items, empty }: { title: string; items: Array<Record<string, unknown>>; empty: string }) => (
+    <section className="rounded-xl border border-slate-700/80 bg-slate-900/45 p-4">
+      <h3 className="text-lg font-extrabold text-white">{title}</h3>
+      <div className="mt-3 space-y-2">
+        {items.length ? items.map((item) => (
+          <div key={workflowValue(item.id)} className="rounded-lg border border-slate-700 bg-slate-950/35 p-3">
+            <div className="text-sm font-extrabold text-slate-100">{workflowValue(item.method || item.action_type || item.destination || item.resolution_type || item.event_type)}</div>
+            <div className="mt-1 text-sm font-semibold leading-6 text-slate-300">{workflowValue(item.findings || item.description || item.reason || item.resolution_summary)}</div>
+            <div className="mt-2 text-xs font-bold text-slate-500">{workflowValue(item.createdBy || item.userName)} | {workflowValue(item.createdAt)}</div>
+          </div>
+        )) : <div className="rounded-lg border border-slate-700 bg-slate-950/35 p-3 text-sm font-bold text-slate-500">{empty}</div>}
+      </div>
+    </section>
+  )
+
+  return (
+    <div className="space-y-5 text-slate-100">
+      <button className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-700 bg-slate-950/45 px-4 text-sm font-extrabold text-slate-200 hover:border-[#16A34A]" onClick={onBack}>
+        <ChevronLeft className="h-4 w-4" /> Back to Voice Records
+      </button>
+      <section className="overflow-hidden rounded-xl border border-slate-700/80 bg-[#1E293B] shadow-[0_18px_40px_rgba(2,6,23,0.24)]">
+        <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-700/80 bg-slate-950/25 px-5 py-5">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded-full border border-[#16A34A]/35 bg-[#16A34A]/10 px-3 py-1 text-xs font-extrabold uppercase text-[#86efac]">{row.id}</span>
+              <AdminStatusBadge value={row.status} />
+              <AdminRiskBadge value={row.priority} />
+            </div>
+            <h2 className="mt-4 text-2xl font-extrabold text-white">{row.programme} voice report</h2>
+            <p className="mt-1 text-sm font-semibold text-slate-400">{row.dateReceived || "Date not captured"} | {row.district || "District not captured"} | {row.duration}</p>
+          </div>
+          {canManage && (
+            <button className="inline-flex h-11 items-center gap-2 rounded-lg bg-[#16A34A] px-4 text-sm font-extrabold text-white shadow-[0_12px_28px_rgba(22,163,74,0.22)] hover:bg-[#15803D]" onClick={() => setActionsOpen(true)}>
+              <MoreVertical className="h-4 w-4" /> Actions
+            </button>
+          )}
+        </div>
+
+        <div className={`grid gap-5 p-5 ${actionsOpen ? "xl:grid-cols-[minmax(0,2fr)_minmax(340px,420px)]" : ""}`}>
+          <div className="min-w-0 space-y-5">
+            <section className="grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
+              <div className="rounded-xl border border-slate-700 bg-slate-950/45 p-4">
+                <div className="mb-4 flex items-center justify-between">
+                  <div className="text-sm font-extrabold text-white">Audio Player</div>
+                  <span className="rounded-full bg-[#16A34A]/15 px-3 py-1 text-xs font-extrabold text-[#86efac]">{row.duration}</span>
+                </div>
+                {row.audioUrl ? <audio ref={audioRef} className="w-full" controls src={row.audioUrl} /> : <div className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-4 text-sm font-extrabold text-slate-400">No recording payload available.</div>}
+                <div className="mt-3"><AudioWaveform audioUrl={row.audioUrl} audioRef={audioRef} /></div>
+              </div>
+              <div className="rounded-xl border border-slate-700 bg-slate-950/35 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-700 pb-3">
+                  <div className="text-sm font-extrabold text-white">Transcript + AI Analysis</div>
+                  <span className="rounded-full border border-[#38BDF8]/35 bg-[#38BDF8]/10 px-3 py-1 text-xs font-extrabold text-[#7dd3fc]">AI assisted</span>
+                </div>
+                <p className="mt-4 whitespace-pre-wrap text-sm font-semibold leading-7 text-slate-100">{row.transcription || "No transcript captured."}</p>
+                <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                  <AdminReadOnlyTile label="Confidence" value={transcriptConfidence} />
+                  <AdminReadOnlyTile label="Language" value={transcriptLanguage} />
+                </div>
+              </div>
+            </section>
+
+            <section className="rounded-xl border border-slate-700/80 bg-slate-900/45 p-4">
+              <h3 className="text-lg font-extrabold text-white">Case Details</h3>
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                <DetailTile label="Programme" value={row.programme} />
+                <DetailTile label="Submission Type" value="Voice Report" />
+                <DetailTile label="Category" value={row.category} />
+                <DetailTile label="Assigned Officer" value={row.assignedTo} />
+                <DetailTile label="Reporter" value={row.reporter} />
+                <DetailTile label="Location" value={row.district || "Not captured"} />
+              </div>
+            </section>
+
+            {investigations.length > 0 && <WorkflowBlock title="Investigation Information" items={investigations} empty="" />}
+            {actions.length > 0 && <WorkflowBlock title="Action Information" items={actions} empty="" />}
+            {referrals.length > 0 && <WorkflowBlock title="Referral Information" items={referrals} empty="" />}
+            {resolutions.length > 0 && <WorkflowBlock title="Resolution Information" items={resolutions} empty="" />}
+            {timeline.length > 0 && <WorkflowBlock title="Case Timeline" items={timeline} empty="" />}
+          </div>
+
+          {actionsOpen && (
+            <aside className="min-w-0">
+              <section className="sticky top-24 overflow-hidden rounded-xl border border-slate-700/80 bg-[#111C2E] text-slate-100 shadow-[0_18px_40px_rgba(2,6,23,0.28)]">
+                <div className="flex items-start justify-between gap-4 border-b border-slate-700 bg-[#172235] p-5">
+                  <div>
+                    <div className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Voice case workspace</div>
+                    <h3 className="mt-1 text-xl font-extrabold text-white">{row.id}</h3>
+                    <p className="mt-1 text-sm font-semibold text-slate-400">{row.status} | {row.priority}</p>
+                  </div>
+                  <button className="grid h-10 w-10 place-items-center rounded-xl border border-slate-700 bg-[#0F172A] text-slate-200 hover:border-[#16A34A]" title="Close actions" onClick={() => setActionsOpen(false)}><X className="h-4 w-4" /></button>
+                </div>
+                <div className="space-y-3 p-5">
+                  <AdminActionButton label="Add Investigation" onClick={() => setActionModal("investigation")} icon={FileSearch} />
+                  <AdminActionButton label="Add Action" onClick={() => setActionModal("action")} icon={Plus} />
+                  <AdminActionButton label="Refer" onClick={() => setActionModal("refer")} icon={Send} />
+                  <AdminActionButton label="Resolve" onClick={() => setActionModal("resolve")} icon={CheckCircle2} />
+                  <AdminActionButton label="Timeline" onClick={() => setActionModal("timeline")} icon={History} />
+                </div>
+              </section>
+            </aside>
+          )}
+        </div>
+      </section>
+
+      {message && <div className="rounded-xl border border-slate-700 bg-[#1E293B] px-4 py-3 text-sm font-bold text-slate-200">{message}</div>}
+
+      {actionModal && (
+        <div className="fixed inset-0 z-[1200] grid place-items-center bg-slate-950/78 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-2xl overflow-hidden rounded-xl border border-slate-700 bg-[#1E293B] text-slate-100 shadow-[0_24px_80px_rgba(2,6,23,0.55)]">
+            <div className="flex items-center justify-between border-b border-slate-700 px-5 py-4">
+              <h3 className="text-lg font-extrabold text-white">{actionModal === "timeline" ? "Timeline" : actionModal === "investigation" ? "Add Investigation" : actionModal === "action" ? "Add Action" : actionModal === "refer" ? "Refer Case" : "Resolution"}</h3>
+              <button className="grid h-9 w-9 place-items-center rounded-lg border border-slate-700 bg-slate-950/45 text-slate-200 hover:border-[#16A34A]" onClick={() => setActionModal(null)}><X className="h-4 w-4" /></button>
+            </div>
+            <div className="grid gap-4 p-5">
+              {actionModal === "timeline" && <WorkflowBlock title="Timeline" items={timeline} empty="No timeline events have been recorded yet." />}
+              {actionModal === "investigation" && <>
+                <AdminDarkSelect label="Method" options={["Phone Call", "Home Visit", "Office Interview", "Document Review", "Other"]} value={investigationForm.method} onChange={(value) => setInvestigationForm({ ...investigationForm, method: value })} />
+                <label className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Persons Contacted<input className="mt-2 h-10 w-full rounded-lg border border-slate-700 bg-slate-950/50 px-3 text-sm font-bold text-slate-200 outline-none focus:border-[#16A34A]" value={investigationForm.persons_contacted} onChange={(event) => setInvestigationForm({ ...investigationForm, persons_contacted: event.target.value })} /></label>
+                <label className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Findings<textarea className="mt-2 min-h-[110px] w-full rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-3 text-sm font-bold text-slate-200 outline-none focus:border-[#16A34A]" value={investigationForm.findings} onChange={(event) => setInvestigationForm({ ...investigationForm, findings: event.target.value })} /></label>
+              </>}
+              {actionModal === "action" && <>
+                <AdminDarkSelect label="Action Type" options={["Phone Call Made", "Home Visit", "Programme Follow-up", "Document Check", "Other"]} value={actionForm.action_type} onChange={(value) => setActionForm({ ...actionForm, action_type: value })} />
+                <label className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Description<textarea className="mt-2 min-h-[110px] w-full rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-3 text-sm font-bold text-slate-200 outline-none focus:border-[#16A34A]" value={actionForm.description} onChange={(event) => setActionForm({ ...actionForm, description: event.target.value })} /></label>
+              </>}
+              {actionModal === "refer" && <>
+                <AdminDarkSelect label="Destination" options={["Programme Focal Person", "District Office", "NGO Partner", "Health Facility", "Police", "Other"]} value={referralForm.destination} onChange={(value) => setReferralForm({ ...referralForm, destination: value })} />
+                <label className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Reason<textarea className="mt-2 min-h-[110px] w-full rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-3 text-sm font-bold text-slate-200 outline-none focus:border-[#16A34A]" value={referralForm.reason} onChange={(event) => setReferralForm({ ...referralForm, reason: event.target.value })} /></label>
+              </>}
+              {actionModal === "resolve" && <>
+                <AdminDarkSelect label="Resolution Type" options={["Resolved", "Partially Resolved", "Information Provided", "Referred and Completed", "Not Valid", "Duplicate"]} value={resolutionForm.resolution_type} onChange={(value) => setResolutionForm({ ...resolutionForm, resolution_type: value })} />
+                <label className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Resolution Summary<textarea className="mt-2 min-h-[110px] w-full rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-3 text-sm font-bold text-slate-200 outline-none focus:border-[#16A34A]" value={resolutionForm.resolution_summary} onChange={(event) => setResolutionForm({ ...resolutionForm, resolution_summary: event.target.value })} /></label>
+                <label className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Corrective Action<input className="mt-2 h-10 w-full rounded-lg border border-slate-700 bg-slate-950/50 px-3 text-sm font-bold text-slate-200 outline-none focus:border-[#16A34A]" value={resolutionForm.corrective_action} onChange={(event) => setResolutionForm({ ...resolutionForm, corrective_action: event.target.value })} /></label>
+              </>}
+            </div>
+            <div className="flex justify-end gap-2 border-t border-slate-700 bg-slate-950/30 px-5 py-4">
+              <button className="rounded-lg border border-slate-700 bg-slate-950/45 px-4 py-2 font-bold text-slate-200 hover:border-slate-500" onClick={() => setActionModal(null)}>Cancel</button>
+              {actionModal !== "timeline" && <button className="rounded-lg bg-[#16A34A] px-5 py-2 font-extrabold text-white disabled:opacity-60" disabled={saving} onClick={() => {
+                if (actionModal === "investigation") void appendVoiceWorkflow("investigations", investigationForm, "Investigation")
+                if (actionModal === "action") void appendVoiceWorkflow("actions", actionForm, "Investigation")
+                if (actionModal === "refer") void appendVoiceWorkflow("referrals", referralForm, "Awaiting Referral Response")
+                if (actionModal === "resolve") void appendVoiceWorkflow("resolutions", resolutionForm, "Closure Requested")
+              }}>{saving ? "Saving..." : "Save"}</button>}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function VoiceReportDetailsModal({ selected, officers, canManage = false, onClose, onSaved, onAssigned, onOpenCase }: { selected: VoiceReportRow; officers: ApiUser[]; canManage?: boolean; onClose: () => void; onSaved: () => Promise<unknown>; onAssigned: () => Promise<unknown>; onOpenCase: () => void }) {
+  const programmeOptions = ["Social Registry", "BEAM", "Food Deficit Mitigation Strategy", "Assisted Medical Treatment Order", "Harmonized Cash Transfer", "Other"]
+  const categoryOptions = ["Complaint", "Abuse", "Feedback", "Other"]
+  const priorityOptions = ["Critical", "High", "Medium", "Low"]
+  const officerOptions = officers.map((user) => user.username).concat("Unassigned")
+  const [programme, setProgramme] = useState(programmeOptions.includes(selected.programme) ? selected.programme : programmeOptions[0])
+  const [category, setCategory] = useState(categoryOptions.includes(selected.category) ? selected.category : categoryOptions[0])
+  const [priority, setPriority] = useState(priorityOptions.includes(selected.priority) ? selected.priority : "Medium")
+  const [assignedTo, setAssignedTo] = useState(officerOptions.includes(selected.assignedTo) ? selected.assignedTo : "Unassigned")
+  const [saving, setSaving] = useState(false)
+  const [message, setMessage] = useState("")
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+
+  async function saveVoiceClassification(assign = false) {
+    if (assign && /^unassigned$/i.test(assignedTo)) {
+      setMessage("Select an officer before assigning this voice report.")
+      return
+    }
+    setSaving(true)
+    setMessage("")
+    try {
+      await apiPost(`/public-submissions/${encodeURIComponent(selected.id)}/classify/`, {
+        programme,
+        category,
+        priority,
+        title: `${programme} ${category.toLowerCase()} voice report`,
+        status: assign ? "Classified" : selected.status,
+        metadata: {
+          assignedTo: assign ? assignedTo : selected.assignedTo,
+          classifiedFrom: "voice-record",
+        },
+      })
+      if (assign) {
+        await onAssigned()
+      } else {
+        await onSaved()
+        setMessage("Classification saved. Assign an officer when ready.")
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not save voice classification.")
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return createPortal(
     <div className="fixed inset-0 z-[90] grid place-items-center bg-slate-950/78 px-4 py-6 backdrop-blur-sm" role="dialog" aria-modal="true">
       <section className="max-h-[92vh] w-full max-w-5xl overflow-y-auto rounded-2xl border border-slate-700 bg-[#1E293B] shadow-[0_30px_90px_rgba(2,6,23,0.6)]">
@@ -14130,32 +15073,53 @@ function VoiceReportDetailsModal({ selected, officers, onClose, onOpenCase }: { 
               <div className="text-sm font-extrabold text-white">Audio Player</div>
               <span className="rounded-full bg-[#16A34A]/15 px-3 py-1 text-xs font-extrabold text-[#86efac]">{selected.duration}</span>
             </div>
-            {selected.audioUrl ? <audio className="w-full" controls src={selected.audioUrl} /> : <div className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-4 text-sm font-extrabold text-slate-400">No recording payload available.</div>}
-            <div className="mt-5 flex h-24 items-center gap-1 rounded-xl border border-slate-700 bg-[#111827] px-3">
-              {Array.from({ length: 28 }, (_, index) => <span key={index} className="flex-1 rounded-full bg-[#16A34A]/70" style={{ height: `${22 + (index % 7) * 9}%` }} />)}
-            </div>
+            {selected.audioUrl ? <audio ref={audioRef} className="w-full" controls src={selected.audioUrl} /> : <div className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-4 text-sm font-extrabold text-slate-400">No recording payload available.</div>}
+            <div className="mt-3"><AudioWaveform audioUrl={selected.audioUrl} audioRef={audioRef} /></div>
           </div>
 
           <div className="rounded-xl border border-slate-700 bg-slate-950/35 p-4">
-            <div className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Transcript</div>
-            <p className="mt-3 text-sm font-semibold leading-7 text-slate-100">{selected.transcription}</p>
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-700 pb-3">
+              <div className="text-sm font-extrabold text-white">Transcript + AI Analysis</div>
+              <span className="rounded-full border border-[#38BDF8]/35 bg-[#38BDF8]/10 px-3 py-1 text-xs font-extrabold text-[#7dd3fc]">AI assisted</span>
+            </div>
+            <p className="mt-4 whitespace-pre-wrap text-sm font-semibold leading-7 text-slate-100">{selected.transcription || "No transcript captured."}</p>
+            <div className="mt-5 grid gap-3 sm:grid-cols-2">
+              <AdminReadOnlyTile label="Confidence" value="98%" />
+              <AdminReadOnlyTile label="Language" value="English" />
+            </div>
           </div>
 
           <div className="rounded-xl border border-slate-700 bg-slate-950/45 p-4">
             <div className="mb-4 text-sm font-extrabold text-white">Case Classification</div>
-            <div className="grid gap-3">
-              <AdminDarkSelect label="Programme" options={["Social Registry", "BEAM", "Food Deficit Mitigation Strategy", "Assisted Medical Treatment Order", "Harmonized Cash Transfer", "Other"]} />
-              <AdminDarkSelect label="Category" options={["Complaint", "Abuse", "Feedback", "Other"]} />
-              <AdminDarkSelect label="Priority" options={["Critical", "High", "Medium", "Low"]} />
-              <AdminDarkSelect label="Assign To" options={officers.map((user) => user.username).concat("Unassigned")} />
-            </div>
+            {canManage ? (
+              <div className="grid gap-3">
+                <AdminDarkSelect label="Programme" options={programmeOptions} value={programme} onChange={setProgramme} />
+                <AdminDarkSelect label="Category" options={categoryOptions} value={category} onChange={setCategory} />
+                <AdminDarkSelect label="Priority" options={priorityOptions} value={priority} onChange={setPriority} />
+                <AdminDarkSelect label="Assign To" options={officerOptions} value={assignedTo} onChange={setAssignedTo} />
+              </div>
+            ) : (
+              <div className="grid gap-3">
+                <AdminReadOnlyTile label="Programme" value={selected.programme || "Pending classification"} />
+                <AdminReadOnlyTile label="Category" value={selected.category || selected.suggestedCategory || "Pending"} />
+                <AdminReadOnlyTile label="Priority" value={selected.priority || "Pending"} />
+                <AdminReadOnlyTile label="Assigned To" value={selected.assignedTo || "Unassigned"} />
+              </div>
+            )}
+            {message && <div className="mt-3 rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2 text-xs font-bold text-slate-300">{message}</div>}
           </div>
         </div>
 
         <div className="flex flex-wrap justify-end gap-2 border-t border-slate-700 px-5 py-4">
-          <AdminTableAction label="Save Classification" onClick={() => undefined} />
-          <AdminTableAction label="Open Case" onClick={onOpenCase} />
-          <AdminTableAction label="Assign Officer" onClick={() => undefined} />
+          {canManage ? (
+            <>
+              <AdminTableAction label={saving ? "Saving..." : "Save Classification"} onClick={() => void saveVoiceClassification(false)} />
+              <AdminTableAction label="Open Case" onClick={onOpenCase} />
+              <AdminTableAction label={saving ? "Assigning..." : "Assign Officer"} onClick={() => void saveVoiceClassification(true)} />
+            </>
+          ) : (
+            <AdminTableAction label="Close" onClick={onClose} />
+          )}
         </div>
       </section>
     </div>,
@@ -14294,6 +15258,7 @@ function AdminAbuseReportsPage({ user, alerts, setSelectedAlertId, setView }: { 
   const abuseRows = alerts.filter((alert) => alert.emergency || alert.danger.length || /abuse|violence|protection/i.test(`${alert.concern} ${alert.description}`))
   const scopedRows = abuseRows.filter((row) => {
     if (!districtScopedRecordVisible(row.district, user)) return false
+    if (!alertAssigned(row)) return false
     if (user.profile.role === "DSDO") return alertAssignedToUser(row, user)
     return true
   })
@@ -14331,10 +15296,73 @@ function AdminAbuseReportsPage({ user, alerts, setSelectedAlertId, setView }: { 
               <AdminTd><AdminStatusBadge value={row.internalStatus || row.status} /></AdminTd>
               <AdminTd>{row.intakeOfficer || row.allocatedOfficer || "Unassigned"}</AdminTd>
               <AdminTd>{row.submittedAt || "Pending"}</AdminTd>
-              <AdminTd><AdminTableAction label="Open Securely" onClick={() => { setSelectedAlertId(row.id); setView("triage") }} /></AdminTd>
+              <AdminTd><AdminTableAction label={userCanActOnEscalatedAlert(row, user) || !["PROVINCIAL_HEAD", "NATIONAL", "NATIONAL_PROGRAM"].includes(user.profile.role) ? "Open Actions" : "View Only"} onClick={() => { setSelectedAlertId(row.id); setView("triage") }} /></AdminTd>
             </tr>
           ))}
           {!filteredRows.length && <AdminEmptyTable colSpan={11} text="No abuse reports match the current search/filter." />}
+        </AdminTable>
+        <AdminTablePagination
+          totalRows={filteredRows.length}
+          page={paginated.safePage}
+          pageCount={paginated.pageCount}
+          pageStart={paginated.pageStart}
+          pageEnd={paginated.pageEnd}
+          rowsPerPage={rowsPerPage}
+          onRowsPerPageChange={(value) => { setRowsPerPage(value); setPage(1) }}
+          onPageChange={setPage}
+        />
+      </AdminDataPanel>
+    </AdminOperationalPage>
+  )
+}
+
+function AdminEscalatedCasesPage({ user, alerts, setSelectedAlertId, setView }: { user: ApiUser; alerts: AlertRecord[]; setSelectedAlertId: (id: string) => void; setView: (view: string) => void }) {
+  const [search, setSearch] = useState("")
+  const [levelFilter, setLevelFilter] = useState("All")
+  const [rowsPerPage, setRowsPerPage] = useState(10)
+  const [page, setPage] = useState(1)
+  const escalatedRows = alerts.filter((alert) => {
+    const level = alertEscalationLevel(alert)
+    if (!level && grfmCaseStatus(alert.internalStatus || alert.status) !== "Escalated") return false
+    if (user.profile.role === "PROVINCIAL_HEAD") return alertEscalatedToProvince(alert)
+    if (["NATIONAL", "NATIONAL_PROGRAM"].includes(user.profile.role)) return alertEscalatedToNational(alert)
+    return true
+  })
+  const levelOptions = ["All", ...Array.from(new Set(escalatedRows.map((row) => alertEscalationLevel(row) || "Escalated").filter(Boolean))).sort()]
+  const normalizedSearch = search.trim().toLowerCase()
+  const filteredRows = escalatedRows.filter((row) => {
+    const level = alertEscalationLevel(row) || "Escalated"
+    const matchesSearch = !normalizedSearch || [row.id, row.concern, row.description, row.programme, row.district, row.priority, level, row.submittedAt].join(" ").toLowerCase().includes(normalizedSearch)
+    const matchesLevel = levelFilter === "All" || level === levelFilter
+    return matchesSearch && matchesLevel
+  })
+  const paginated = paginateAdminRows(filteredRows, page, rowsPerPage)
+  return (
+    <AdminOperationalPage title="Escalated Cases" subtitle="Cases escalated to your oversight level for action. Non-escalated cases remain read-only in the general queues.">
+      <AdminDataPanel title="Escalated Cases Table" count={`${filteredRows.length} escalated records`}>
+        <AdminTableControls
+          search={search}
+          onSearchChange={(value) => { setSearch(value); setPage(1) }}
+          filterLabel="Escalation Level"
+          filterValue={levelFilter}
+          filterOptions={levelOptions}
+          onFilterChange={(value) => { setLevelFilter(value); setPage(1) }}
+          placeholder="Search escalated case, district, programme..."
+        />
+        <AdminTable headers={["Case Ref", "Summary", "District", "Level", "Priority", "Status", "Submitted", "Action"]}>
+          {paginated.rows.map((row) => (
+            <tr key={row.id} className="border-b border-slate-800/90 hover:bg-slate-800/55">
+              <AdminTd strong>{row.id}</AdminTd>
+              <AdminTd><div className="max-w-[420px] truncate font-extrabold text-slate-100" title={row.concern || row.description}>{row.concern || row.description || "Escalated GRFM case"}</div></AdminTd>
+              <AdminTd>{row.district || "Unassigned"}</AdminTd>
+              <AdminTd>{alertEscalationLevel(row) || "Escalated"}</AdminTd>
+              <AdminTd><AdminRiskBadge value={row.priority || row.riskLevel || "High"} /></AdminTd>
+              <AdminTd><AdminStatusBadge value={row.internalStatus || row.status} /></AdminTd>
+              <AdminTd>{row.submittedAt || "Pending"}</AdminTd>
+              <AdminTd><AdminTableAction label="Open Actions" onClick={() => { setSelectedAlertId(row.id); setView("triage") }} /></AdminTd>
+            </tr>
+          ))}
+          {!filteredRows.length && <AdminEmptyTable colSpan={8} text="No cases have been escalated to this level yet." />}
         </AdminTable>
         <AdminTablePagination
           totalRows={filteredRows.length}
@@ -14581,6 +15609,15 @@ function AdminDarkSelect({ label, options, value, required = false, onChange }: 
   )
 }
 
+function AdminReadOnlyTile({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div>
+      <div className="text-xs font-extrabold uppercase tracking-wide text-slate-500">{label}</div>
+      <div className="mt-2 min-h-10 rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2 text-sm font-bold text-slate-200">{value}</div>
+    </div>
+  )
+}
+
 function adminDaysOpen(dateValue?: string) {
   if (!dateValue) return "0"
   const time = new Date(dateValue).getTime()
@@ -14791,16 +15828,19 @@ function RoleBasedGrmMap({ user, onOpenCase, title = "Interactive National Map" 
           ) : null}
           <LayerGroup>
             {clusters.map((cluster) => cluster.items.length > 1 ? (
-              <CircleMarker key={cluster.id} center={[cluster.lat, cluster.lng]} radius={clusterRadius(cluster.items.length)} pathOptions={{ color: "#0F172A", fillColor: clusterColor(cluster.items.length), fillOpacity: 0.86, weight: 2.5 }}>
-                <Tooltip permanent direction="center" className="!border-0 !bg-transparent !p-0 !text-xs !font-extrabold !text-white !shadow-none">
-                  {cluster.items.length}
-                </Tooltip>
-                <Popup>
-                  <strong>{cluster.items.length} cases in this area</strong>
-                  <br />
-                  {cluster.items.slice(0, 5).map((item) => item.case_reference).join(", ")}
-                </Popup>
-              </CircleMarker>
+              <Fragment key={cluster.id}>
+                <CircleMarker center={[cluster.lat, cluster.lng]} radius={clusterRadius(cluster.items.length) + 9} pathOptions={{ className: "grfm-map-cluster-ring", color: clusterColor(cluster.items.length), fillColor: clusterColor(cluster.items.length), fillOpacity: 0.12, opacity: 0.32, weight: 1 }} />
+                <CircleMarker center={[cluster.lat, cluster.lng]} radius={clusterRadius(cluster.items.length)} pathOptions={{ className: "grfm-map-cluster-pulse", color: "#0F172A", fillColor: clusterColor(cluster.items.length), fillOpacity: 0.92, weight: 2.5 }}>
+                  <Tooltip permanent direction="center" className="!border-0 !bg-transparent !p-0 !text-xs !font-extrabold !text-white !shadow-none">
+                    {cluster.items.length}
+                  </Tooltip>
+                  <Popup>
+                    <strong>{cluster.items.length} cases in this area</strong>
+                    <br />
+                    {cluster.items.slice(0, 5).map((item) => item.case_reference).join(", ")}
+                  </Popup>
+                </CircleMarker>
+              </Fragment>
             ) : (
               <MapCaseMarker key={cluster.items[0].id} marker={cluster.items[0]} onOpenCase={onOpenCase} />
             ))}
@@ -14937,10 +15977,12 @@ function MapCaseMarker({ marker, onOpenCase }: { marker: MapMarkerRecord; onOpen
   const priority = priorityLevel(marker)
   const emergency = priority === "Critical"
   const color = mapCaseColor(marker)
+  const markerRadius = priority === "Critical" ? 8 : priority === "High" ? 7 : 6
   return (
     <>
+      <CircleMarker center={[marker.lat, marker.lng]} radius={markerRadius + 9} pathOptions={{ className: "grfm-map-cluster-ring", color, fillColor: color, fillOpacity: 0.12, opacity: 0.32, weight: 1 }} />
       {emergency && <CircleMarker center={[marker.lat, marker.lng]} radius={15} pathOptions={{ className: "grfm-map-heartbeat-ring", color: "#EF4444", fillColor: "#EF4444", fillOpacity: 0.14, opacity: 0.35, weight: 1 }} />}
-      <CircleMarker center={[marker.lat, marker.lng]} radius={priority === "Critical" ? 8 : priority === "High" ? 7 : 6} pathOptions={{ className: "grfm-map-heartbeat-dot", color: "#0F172A", fillColor: color, fillOpacity: 0.92, weight: 2 }} eventHandlers={{ click: () => onOpenCase(marker) }}>
+      <CircleMarker center={[marker.lat, marker.lng]} radius={markerRadius} pathOptions={{ className: "grfm-map-cluster-pulse", color: "#0F172A", fillColor: color, fillOpacity: 0.92, weight: 2 }} eventHandlers={{ click: () => onOpenCase(marker) }}>
         <Popup>
           <div className="min-w-[220px] text-sm">
             {emergency && <div className="mb-2 rounded bg-red-500/15 px-2 py-1 text-xs font-bold text-red-200">Emergency / Immediate Action Required</div>}
@@ -15520,21 +16562,23 @@ function SideNav({ title, active, setActive, items }: { title: string; active: s
 function InternalSideNav({ active, setActive, user, collapsed, onToggle, onLogout }: { active: string; setActive: (value: string) => void; user: ApiUser; collapsed: boolean; onToggle: () => void; onLogout: () => void }) {
   const activeNav = active === "triage" ? (user.profile.role === "DSDO" ? "complaints" : "case-alerts") : active
   const isAdminUser = user.profile.role === "SYS_ADMIN"
-  const operationsItems: Array<[string, string, ElementType]> = user.profile.role === "DSDO"
+  const activeQueueItems: Array<[string, string, ElementType]> = user.profile.role === "DSDO"
     ? [
       ["complaints", "Complaints", Megaphone],
       ["abuse-reports", "Abuse Reports", ShieldAlert],
       ["voice-reports", "Voice Records", Mic],
-      ["resolved-cases", "Resolved Cases", CheckCircle2],
     ]
     : [
       ["case-alerts", "GRFM Queue", Inbox],
-      ["feedback", "Feedback", MessageSquareMore],
       ["complaints", "Complaints", Megaphone],
       ["abuse-reports", "Abuse Reports", ShieldAlert],
       ["voice-reports", "Voice Records", Mic],
-      ["resolved-cases", "Resolved Cases", CheckCircle2],
     ]
+  const escalationItems: Array<[string, string, ElementType]> = ["PROVINCIAL_HEAD", "NATIONAL", "NATIONAL_PROGRAM", "SYS_ADMIN"].includes(user.profile.role)
+    ? [["escalated-cases", "Escalated Cases", ShieldAlert]]
+    : []
+  const feedbackItems: Array<[string, string, ElementType]> = user.profile.role === "DSDO" ? [] : [["feedback", "Feedback", MessageSquareMore]]
+  const closureItems: Array<[string, string, ElementType]> = [["resolved-cases", "Resolved Cases", CheckCircle2]]
   type AdminNavSection = { title: string; items: Array<[string, string, ElementType]> }
   const navSectionsBase: AdminNavSection[] = [
     {
@@ -15542,8 +16586,20 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle, onLogou
       items: [["dashboard", "Dashboard", LayoutDashboard]],
     },
     {
-      title: "Operations",
-      items: operationsItems,
+      title: "Active Queues",
+      items: activeQueueItems,
+    },
+    {
+      title: "Escalations",
+      items: escalationItems,
+    },
+    {
+      title: "Citizen Input",
+      items: feedbackItems,
+    },
+    {
+      title: "Closure",
+      items: closureItems,
     },
     {
       title: "Monitoring",
@@ -15567,7 +16623,7 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle, onLogou
       items: [["reports", "Reports", FileText]],
     },
   ]
-  const navSections = navSectionsBase.filter((section) => isAdminUser || section.title !== "Administration")
+  const navSections = navSectionsBase.filter((section) => section.items.length && (isAdminUser || section.title !== "Administration"))
 
   return (
     <aside className="flex min-h-full flex-col overflow-hidden border-r border-slate-800 bg-[#0B1220] text-slate-200 shadow-[10px_0_30px_rgba(2,6,23,0.24)]">
@@ -15650,6 +16706,7 @@ function InternalTopBar({
   const pageTitles: Record<string, string> = {
     dashboard: "Dashboard",
     "case-alerts": "GRFM Queue",
+    "escalated-cases": "Escalated Cases",
     complaints: "Complaints",
     feedback: "Feedback",
     "abuse-reports": "Abuse Reports",
@@ -17156,8 +18213,8 @@ function PartnerManagementSetup({
   refreshReferenceData: () => Promise<{ provinceData: ProvinceOption[]; districtData: DistrictOption[]; wardData: WardOption[]; organizationData: OrganizationOption[]; relationshipTypeData: RelationshipTypeOption[] }>
 }) {
   const configs: Record<string, { title: string; endpoint: string; nameKey: keyof SetupRecord; typeKey?: keyof SetupRecord; typeLabel?: string; createLabel: string; tableMinWidth: string }> = {
-    provinces: { title: "Provinces", endpoint: "/provinces/", nameKey: "name", createLabel: "Add Province", tableMinWidth: "760px" },
-    districts: { title: "Districts", endpoint: "/districts/", nameKey: "name", createLabel: "Add District", tableMinWidth: "820px" },
+    provinces: { title: "Provinces", endpoint: "/provinces/", nameKey: "name", createLabel: "Add Province", tableMinWidth: "1120px" },
+    districts: { title: "Districts", endpoint: "/districts/", nameKey: "name", createLabel: "Add District", tableMinWidth: "1120px" },
     "district-wards": { title: "Wards", endpoint: "/wards/", nameKey: "name", createLabel: "Add Ward", tableMinWidth: "900px" },
     ccws: { title: "CCWs", endpoint: "/ccws/", nameKey: "full_name", typeKey: "gender", typeLabel: "Gender", createLabel: "Add CCW", tableMinWidth: "980px" },
     "partners-in-district": { title: "Partners in District", endpoint: "/partners-in-district/", nameKey: "partner_name", typeKey: "partner_type", typeLabel: "Partner type", createLabel: "Add Partner", tableMinWidth: "1040px" },
@@ -17377,9 +18434,9 @@ function PartnerManagementSetup({
 }
 
 function getSetupTableHeaders(view: string) {
-  if (view === "provinces") return ["Province", "Code", "Audit", "Status", "Actions"]
+  if (view === "provinces") return ["Province", "Code", "Support contacts", "Office address", "Audit", "Status", "Actions"]
   if (view === "relationship-types") return ["Relationship", "Description", "Audit", "Status", "Actions"]
-  if (view === "districts") return ["District", "Location", "Audit", "Status", "Actions"]
+  if (view === "districts") return ["District", "Location", "Support contacts", "Office address", "Audit", "Status", "Actions"]
   if (view === "district-wards") return ["Ward", "Location", "Description", "Status", "Actions"]
   if (view === "ccws") return ["CCW", "Location", "Contact", "Base", "Status", "Actions"]
   if (view === "partners-in-district") return ["Partner", "Location", "Contact", "Services", "Status", "Actions"]
@@ -17422,6 +18479,8 @@ function renderSetupCells(view: string, record: SetupRecord, openView: () => voi
     return <>
       <td className="px-5 py-4"><SetupPrimary title={formatSetupText(record.name)} meta="Province setup" onClick={openView} /></td>
       <td className="px-5 py-4 font-bold text-slate-400">{formatSetupValue(record.code)}</td>
+      <td className="px-5 py-4"><SetupTextStack primary={record.toll_free_number || "No toll-free number"} secondary={record.whatsapp_number ? `WhatsApp: ${record.whatsapp_number}` : "No WhatsApp number"} /></td>
+      <td className="px-5 py-4"><div className="max-w-[260px] text-sm font-semibold text-slate-400">{formatSetupValue(record.office_address)}</div></td>
       <td className="px-5 py-4">{audit}</td>
       {statusCell}
     </>
@@ -17430,6 +18489,8 @@ function renderSetupCells(view: string, record: SetupRecord, openView: () => voi
     return <>
       <td className="px-5 py-4"><SetupPrimary title={formatSetupText(record.name)} meta={record.code || "No district code"} onClick={openView} /></td>
       <td className="px-5 py-4"><SetupTextStack primary={record.provinceName || "Province not captured"} /></td>
+      <td className="px-5 py-4"><SetupTextStack primary={record.toll_free_number || "No toll-free number"} secondary={record.whatsapp_number ? `WhatsApp: ${record.whatsapp_number}` : "No WhatsApp number"} /></td>
+      <td className="px-5 py-4"><div className="max-w-[260px] text-sm font-semibold text-slate-400">{formatSetupValue(record.office_address)}</div></td>
       <td className="px-5 py-4">{audit}</td>
       {statusCell}
     </>
@@ -17556,9 +18617,9 @@ function formatSetupText(value: unknown) {
 }
 
 function buildSetupPayload(view: string, form: SetupRecord) {
-  if (view === "provinces") return { name: form.name || "", code: form.code || "", status: form.status || "Active" }
+  if (view === "provinces") return { name: form.name || "", code: form.code || "", toll_free_number: form.toll_free_number || "", whatsapp_number: form.whatsapp_number || "", office_address: form.office_address || "", status: form.status || "Active" }
   if (view === "relationship-types") return { name: form.name || "", description: form.description || "", status: form.status || "Active" }
-  if (view === "districts") return { province: form.province, name: form.name || "", code: (form.code || "").toUpperCase(), status: form.status || "Active" }
+  if (view === "districts") return { province: form.province, name: form.name || "", code: (form.code || "").toUpperCase(), toll_free_number: form.toll_free_number || "", whatsapp_number: form.whatsapp_number || "", office_address: form.office_address || "", status: form.status || "Active" }
   if (view === "district-wards") return { district: form.district, name: form.name || "", description: form.description || "", status: form.status || "Active" }
   if (view === "ccws") return { district: form.district, ward: form.ward || null, username: form.username || "", password: form.password || "", full_name: form.full_name || "", national_id: form.national_id || "", gender: form.gender || "", phone: form.phone || "", email: form.email || "", physical_address: form.physical_address || "", status: form.status || "Active", date_registered: form.date_registered || null }
   if (view === "partners-in-district") return { district: form.district, partner_name: form.partner_name || "", partner_type: form.partner_type || "", partner_type_other: form.partner_type === "Other" ? form.partner_type_other || "" : "", services_offered: form.services_offered || [], services_offered_other: form.services_offered?.includes("Other") ? form.services_offered_other || "" : "", contact_person: form.contact_person || "", phone: form.phone || "", email: form.email || "", address: form.address || "", operating_area: form.operating_area || "", status: form.status || "Active" }
@@ -17571,10 +18632,22 @@ function SetupForm({ view, form, setFormValue, provinces, districts, wards, lock
   const needsDistrict = !["provinces", "relationship-types"].includes(view)
   return (
     <FormGrid>
-      {view === "provinces" && <><Field label="Province name"><input className={inputClass} disabled={readOnly} value={form.name || ""} onChange={(event) => setFormValue("name", event.target.value)} /></Field><Field label="Code"><input className={inputClass} disabled={readOnly} value={form.code || ""} onChange={(event) => setFormValue("code", event.target.value)} /></Field></>}
+      {view === "provinces" && <>
+        <Field label="Province name"><input className={inputClass} disabled={readOnly} value={form.name || ""} onChange={(event) => setFormValue("name", event.target.value)} /></Field>
+        <Field label="Code"><input className={inputClass} disabled={readOnly} value={form.code || ""} onChange={(event) => setFormValue("code", event.target.value)} /></Field>
+        <Field label="Toll-free number"><input className={inputClass} disabled={readOnly} value={form.toll_free_number || ""} placeholder="e.g. 0808..." onChange={(event) => setFormValue("toll_free_number", event.target.value)} /></Field>
+        <Field label="WhatsApp support number"><input className={inputClass} disabled={readOnly} value={form.whatsapp_number || ""} placeholder="e.g. 2637..." onChange={(event) => setFormValue("whatsapp_number", event.target.value)} /></Field>
+        <div className="md:col-span-2"><Field label="Provincial office address"><textarea className={`${inputClass} min-h-[90px] py-3`} disabled={readOnly} value={form.office_address || ""} onChange={(event) => setFormValue("office_address", event.target.value)} /></Field></div>
+      </>}
       {view === "relationship-types" && <><Field label="Relationship name" required><input className={inputClass} disabled={readOnly} value={form.name || ""} onChange={(event) => setFormValue("name", event.target.value)} /></Field><div className="md:col-span-2"><Field label="Description"><textarea className={`${inputClass} min-h-[90px] py-3`} disabled={readOnly} value={form.description || ""} onChange={(event) => setFormValue("description", event.target.value)} /></Field></div></>}
       {needsProvince && <Field label="Province"><select className={disabledClass} disabled={readOnly || lockedProvince} value={form.province || ""} onChange={(event) => setFormValue("province", Number(event.target.value) || null)}><option value="">Select province</option>{provinces.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></Field>}
-      {view === "districts" && <><Field label="District name" required><input className={inputClass} disabled={readOnly} value={form.name || ""} onChange={(event) => setFormValue("name", event.target.value)} /></Field><Field label="District code (3 letters)" required><input className={inputClass} disabled={readOnly} value={form.code || ""} maxLength={3} pattern="[A-Za-z]{3}" placeholder="e.g. HRE" onChange={(event) => setFormValue("code", event.target.value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 3))} /></Field></>}
+      {view === "districts" && <>
+        <Field label="District name" required><input className={inputClass} disabled={readOnly} value={form.name || ""} onChange={(event) => setFormValue("name", event.target.value)} /></Field>
+        <Field label="District code (3 letters)" required><input className={inputClass} disabled={readOnly} value={form.code || ""} maxLength={3} pattern="[A-Za-z]{3}" placeholder="e.g. HRE" onChange={(event) => setFormValue("code", event.target.value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 3))} /></Field>
+        <Field label="Toll-free number"><input className={inputClass} disabled={readOnly} value={form.toll_free_number || ""} placeholder="e.g. 0808..." onChange={(event) => setFormValue("toll_free_number", event.target.value)} /></Field>
+        <Field label="WhatsApp support number"><input className={inputClass} disabled={readOnly} value={form.whatsapp_number || ""} placeholder="e.g. 2637..." onChange={(event) => setFormValue("whatsapp_number", event.target.value)} /></Field>
+        <div className="md:col-span-2"><Field label="Social Development office address"><textarea className={`${inputClass} min-h-[90px] py-3`} disabled={readOnly} value={form.office_address || ""} onChange={(event) => setFormValue("office_address", event.target.value)} /></Field></div>
+      </>}
       {needsDistrict && view !== "districts" && <Field label="District"><select className={disabledClass} disabled={readOnly || lockedDistrict} value={form.district || ""} onChange={(event) => setFormValue("district", Number(event.target.value) || null)}><option value="">Select district</option>{districts.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></Field>}
       {view === "district-wards" && <><Field label="Ward name or number" required><input className={inputClass} disabled={readOnly} value={form.name || ""} onChange={(event) => setFormValue("name", event.target.value)} /></Field><Field label="Description"><input className={inputClass} disabled={readOnly} value={form.description || ""} onChange={(event) => setFormValue("description", event.target.value)} /></Field></>}
       {view === "ccws" && <Field label="Base ward"><select className={inputClass} disabled={readOnly} value={form.ward || ""} onChange={(event) => setFormValue("ward", Number(event.target.value) || null)}><option value="">No base ward selected</option>{wards.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></Field>}
@@ -17972,13 +19045,10 @@ function Setup({
   const filteredDistricts = provinceId ? districts.filter((item) => item.province === provinceId) : districts
   const filteredWards = districtId ? wards.filter((item) => item.district === districtId) : []
   const filteredOrganizations = districtId ? organizations.filter((item) => !item.district || item.district === districtId) : organizations
-  const activeRoleOptions = Array.from(
-    tableUsers.reduce((roles, item) => {
-      roles.set(item.profile.role, item.profile.roleLabel || item.profile.role)
-      return roles
-    }, new Map<string, string>()),
-  ).sort(([, firstLabel], [, secondLabel]) => firstLabel.localeCompare(secondLabel))
-  const roleSummary = activeRoleOptions.length ? activeRoleOptions.map(([, label]) => label).join(", ") : "No roles assigned yet"
+  const activeRoleOptions = roleOptions
+    .map(([value, label]) => [value, label.replace(" - internal", "").replace(" - public portal", "")] as const)
+    .sort(([, firstLabel], [, secondLabel]) => firstLabel.localeCompare(secondLabel))
+  const roleSummary = activeRoleOptions.map(([, label]) => label).join(", ")
   const visibleUsers = roleFilter ? tableUsers.filter((item) => item.profile.role === roleFilter) : tableUsers
   const pageCount = Math.max(1, Math.ceil(visibleUsers.length / rowsPerPage))
   const safePage = Math.min(page, pageCount)

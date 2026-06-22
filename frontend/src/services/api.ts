@@ -58,6 +58,7 @@ type ApiRequestOptions = RequestInit & {
 }
 
 type HttpMethod = "GET" | "POST" | "PATCH" | "DELETE"
+type QueuedHttpMethod = Exclude<HttpMethod, "GET">
 
 export class OfflineQueuedError extends Error {
   queued: OfflineRecordMetadata
@@ -142,6 +143,23 @@ function isNetworkError(error: unknown) {
   return !navigator.onLine || error instanceof TypeError || (error instanceof Error && /failed to fetch|network|load failed/i.test(error.message))
 }
 
+async function baseUpdatedAt(path: string, body: unknown) {
+  if (body && typeof body === "object" && "updated_at" in body && typeof (body as { updated_at?: unknown }).updated_at === "string") {
+    return (body as { updated_at: string }).updated_at
+  }
+  const cached = await getCachedApiResponse<{ updated_at?: string }>(path)
+  return cached?.updated_at || ""
+}
+
+async function enqueueOfflineRequest(path: string, method: QueuedHttpMethod, body: unknown) {
+  return enqueueSyncRequest({
+    method,
+    path,
+    body,
+    base_updated_at: await baseUpdatedAt(path, body),
+  })
+}
+
 function queuedFallback<T>(path: string, method: HttpMethod, body: unknown, metadata: OfflineRecordMetadata): T {
   const now = metadata.last_modified_at
   if (method === "PATCH" || method === "DELETE") return undefined as T
@@ -202,7 +220,7 @@ async function request<T>(path: string, options: ApiRequestOptions = {}): Promis
     }
     if (method !== "GET" && !skipAuth && isNetworkError(error)) {
       const body = typeof fetchOptions.body === "string" ? JSON.parse(fetchOptions.body || "{}") : fetchOptions.body
-      const queued = await enqueueSyncRequest({ method, path, body })
+      const queued = await enqueueOfflineRequest(path, method, body)
       return queuedFallback<T>(path, method, body, queued)
     }
     throw error
@@ -214,7 +232,7 @@ async function request<T>(path: string, options: ApiRequestOptions = {}): Promis
     } catch (error) {
       if (method !== "GET" && isNetworkError(error)) {
         const body = typeof fetchOptions.body === "string" ? JSON.parse(fetchOptions.body || "{}") : fetchOptions.body
-        const queued = await enqueueSyncRequest({ method, path, body })
+        const queued = await enqueueOfflineRequest(path, method, body)
         return queuedFallback<T>(path, method, body, queued)
       }
       throw error
