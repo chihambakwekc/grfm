@@ -8,6 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Q
 from django.http import HttpResponse
@@ -490,6 +491,17 @@ def feature_collection(features):
     return {"type": "FeatureCollection", "features": list(features)}
 
 
+def map_boundaries_cache_key(user, scope):
+    return ":".join([
+        "map-boundaries",
+        str(user.id),
+        str(scope.get("level") or ""),
+        str(scope.get("role") or ""),
+        normalized_geo_name(scope.get("province") or ""),
+        normalized_geo_name(scope.get("district") or ""),
+    ])
+
+
 def normalized_geo_name(value):
     normalized = str(value or "").strip().casefold()
     for suffix in (" metropolitan province", " province", " metropolitan"):
@@ -775,6 +787,11 @@ class MapBoundariesView(APIView):
 
     def get(self, request):
         scope = map_user_scope(request.user)
+        cache_key = map_boundaries_cache_key(request.user, scope)
+        cached_payload = cache.get(cache_key)
+        if cached_payload is not None:
+            return Response(cached_payload)
+
         province_geo = load_geojson("provinces.geojson")
         district_geo = load_geojson("districts.geojson")
         if scope["level"] == "national":
@@ -811,7 +828,7 @@ class MapBoundariesView(APIView):
             province_metrics.setdefault(province_name, {"districts": sum(1 for district in district_features if district.get("properties", {}).get("adm1_name") == province_name), "open_cases": 0, "critical_cases": 0, "response_seconds": []})
             province_metrics[province_name]["districts"] = sum(1 for district in district_features if district.get("properties", {}).get("adm1_name") == province_name)
 
-        return Response({
+        payload = {
             "scope": scope,
             "provinces": feature_collection(province_features),
             "districts": feature_collection(district_features),
@@ -833,7 +850,9 @@ class MapBoundariesView(APIView):
                     } for name, row in province_metrics.items()
                 },
             },
-        })
+        }
+        cache.set(cache_key, payload, 60)
+        return Response(payload)
 
 
 class MapCasesView(APIView):

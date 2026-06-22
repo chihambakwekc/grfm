@@ -15770,7 +15770,7 @@ function RoleBasedGrmMap({ user, onOpenCase, title = "Interactive National Map" 
       </div>
       <div className="relative h-[480px] border-b border-slate-700/80 bg-[#07111f] [&_.leaflet-container]:bg-[#0F172A] [&_.leaflet-control-layers]:border-slate-700 [&_.leaflet-control-layers]:bg-slate-900 [&_.leaflet-control-layers]:text-slate-100 [&_.leaflet-popup-content-wrapper]:bg-slate-900 [&_.leaflet-popup-content-wrapper]:text-slate-100 [&_.leaflet-popup-tip]:bg-slate-900">
         <MapOptionsControl open={mapOptionsOpen} setOpen={setMapOptionsOpen} showKey={showMapKey} setShowKey={setShowMapKey} />
-        {loading && <div className="absolute inset-0 z-[500] grid place-items-center bg-slate-950/65 text-sm font-bold text-slate-200">Loading secured map view...</div>}
+        {loading && <div className="absolute left-1/2 top-4 z-[500] -translate-x-1/2 rounded-full border border-slate-600 bg-slate-950/85 px-4 py-2 text-xs font-extrabold text-slate-100 shadow-lg">Loading secured map view...</div>}
         {error && <div className="absolute inset-0 z-[500] grid place-items-center bg-slate-950/80 p-4 text-center text-sm font-bold text-red-200">{error}</div>}
         <MapContainer className="h-full w-full" center={[-19.0, 29.8]} zoom={6.2} minZoom={6} maxZoom={12} scrollWheelZoom>
           <TileLayer attribution="&copy; CARTO &copy; OpenStreetMap" url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png" />
