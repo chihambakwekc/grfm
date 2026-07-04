@@ -68,7 +68,7 @@ import {
 import ReactECharts from "echarts-for-react"
 import { useTranslation } from "react-i18next"
 import type { ElementType, ReactNode } from "react"
-import { Fragment, useEffect, useRef, useState } from "react"
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import { geoJSON } from "leaflet"
 import type { LatLngBoundsExpression } from "leaflet"
@@ -80,6 +80,7 @@ import { pendingSyncCount } from "./services/offlineDb"
 import { registerSyncTriggers } from "./services/syncQueue"
 import nationalCoatOfArms from "./assets/cot.svg"
 import { supportedLanguages, type SupportedLanguage } from "./i18n"
+import { cn } from "./lib/utils"
 
 type Portal = "external" | "admin"
 type AlertStatus =
@@ -546,7 +547,7 @@ function PublicLanguageSwitch({
   const shellClass = size === "nav" ? "gap-0 border-[#dce9df] bg-white/95 p-[2px] shadow-none sm:gap-0.5 sm:shadow-[0_4px_12px_rgba(15,23,42,0.055)]" : "gap-1 border-[#d8eadc] bg-white/85 p-1 shadow-sm"
   const buttonClass = size === "nav" ? "h-6 px-1.5 text-[10px] sm:px-2 sm:text-[11px]" : size === "compact" ? "h-7 px-2 text-[11px]" : "h-8 px-2.5 text-xs"
   return (
-    <div className={`inline-flex isolate items-center overflow-hidden rounded-full border ${shellClass} ${className}`} aria-label="Select language">
+    <div className={cn("inline-flex isolate items-center overflow-hidden rounded-full border", shellClass, className)} aria-label="Select language">
       {supportedLanguages.map((language) => {
         const active = selectedCode === language.code
         return (
@@ -1992,7 +1993,7 @@ function PublicHomeDashboard({
   ]
 
   return (
-    <div className="space-y-5 pb-10">
+    <div className="space-y-5 pb-3 sm:pb-10">
       <section className="overflow-hidden rounded-[24px] bg-[linear-gradient(135deg,#0e7a33_0%,#0b4d2d_100%)] px-5 py-5 text-white shadow-[0_18px_44px_rgba(15,23,42,0.14)] sm:px-6">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="max-w-4xl">
@@ -2635,6 +2636,10 @@ function PublicActionPlaceholder({ action, user, provinces, districts, wards, on
   const selectedProgram = publicProgrammes.find((programme) => programme.name === selectedProgramme) || publicProgrammes[0]
   const inputClass = "h-11 w-full rounded-xl border border-[#d8dee8] bg-white px-3 text-sm font-semibold text-[#0f172a] outline-none transition focus:border-[#0e7a33] focus:ring-4 focus:ring-[#0e7a33]/15"
   const textareaClass = "min-h-[120px] w-full rounded-xl border border-[#d8dee8] bg-white px-3 py-3 text-sm font-semibold text-[#0f172a] outline-none transition focus:border-[#0e7a33] focus:ring-4 focus:ring-[#0e7a33]/15"
+
+  useLayoutEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" })
+  }, [workflowStep])
 
   function selectProgramme(programme: string) {
     setSelectedProgramme(programme)
@@ -4285,6 +4290,10 @@ function ExternalPortal({
   const [selectedPublicAction, setSelectedPublicAction] = useState("Register Complaint")
   const selectedLanguage = i18n.language
 
+  useLayoutEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" })
+  }, [view, selectedPublicAction])
+
   function changePublicLanguage(language: string) {
     void i18n.changeLanguage(language)
   }
@@ -4295,12 +4304,24 @@ function ExternalPortal({
     `h-10 rounded-full px-3 text-sm font-extrabold transition hover:bg-[#f1f8f3] hover:text-[#0e7a33] ${view === targetView ? "bg-[#f1f8f3] text-[#0e7a33]" : "text-[#475569]"}`
   const mobileNavButtonClass = (targetView: string) =>
     `h-10 rounded-lg text-sm font-extrabold transition ${view === targetView ? "bg-[#f1f8f3] text-[#0e7a33]" : "bg-[#f8fafc] text-[#475569]"}`
+  const compactMobileNavButtonClass = (targetView: string) =>
+    `h-7 rounded-md px-1 text-[10px] font-extrabold transition ${view === targetView ? "bg-[#e8f5ec] text-[#0e7a33]" : "bg-[#f8fafc] text-[#475569]"}`
 
   return (
     <main className="min-h-screen bg-[#F4F7F4] text-[#27364d]">
       <header className="sticky top-0 z-30 border-b border-[#d8dee8] bg-white/95 shadow-sm backdrop-blur">
         <div className="mx-auto grid max-w-7xl grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-2 py-3 sm:grid-cols-[minmax(220px,1fr)_auto_auto] sm:px-4 xl:grid-cols-[minmax(260px,1fr)_auto_minmax(320px,1fr)] xl:gap-3">
-          <div className="flex min-w-0 items-center gap-3 xl:col-start-1 xl:row-start-1">
+          <button
+            type="button"
+            className="flex min-w-0 items-center gap-3 rounded-xl text-left transition hover:bg-[#f7fbf8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0e7a33]/30 xl:col-start-1 xl:row-start-1"
+            onClick={() => {
+              setView("dashboard")
+              setMobileNavOpen(false)
+              setNotificationOpen(false)
+              setUserMenuOpen(false)
+            }}
+            title={t("nav.home")}
+          >
             <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-[#cfe8d0] bg-[linear-gradient(145deg,#ffffff,#eef8ef)] p-1.5 shadow-sm sm:h-12 sm:w-12">
               <img className="h-full w-full object-contain drop-shadow-[0_4px_8px_rgba(14,122,51,0.12)]" src={nationalCoatOfArms} alt="National coat of arms" />
             </div>
@@ -4308,23 +4329,31 @@ function ExternalPortal({
               <h1 className="truncate text-sm font-extrabold text-[#0f172a] sm:text-lg">{t("portal.title")}</h1>
               <p className="hidden text-xs font-semibold text-[#64748b] sm:block">{t("portal.publicPortal")}</p>
             </div>
-          </div>
+          </button>
           <nav className="hidden items-center justify-center gap-0.5 xl:col-start-2 xl:row-start-1 xl:flex xl:-translate-x-3 2xl:-translate-x-5">
             <button className={navButtonClass("dashboard")} onClick={() => setView("dashboard")}>{t("nav.home")}</button>
             <button className={navButtonClass("track-cases")} onClick={() => setView("track-cases")}>{t("nav.trackCase")}</button>
             <button className="h-10 rounded-full px-3 text-sm font-extrabold text-[#475569] hover:bg-[#f1f8f3] hover:text-[#0e7a33]">{t("nav.learn")}</button>
             <button className={navButtonClass("support-locations")} onClick={() => setView("support-locations")}>{t("nav.help")}</button>
           </nav>
-          <div className="col-span-2 row-start-2 justify-self-start sm:col-span-1 sm:col-start-2 sm:row-start-1 sm:mr-3 sm:justify-self-center xl:hidden">
+          <div className={`col-span-2 row-start-2 flex w-full items-start gap-2 sm:col-span-1 sm:col-start-2 sm:row-start-1 sm:mr-3 sm:w-auto sm:justify-self-center xl:hidden ${mobileNavOpen ? "justify-between" : "justify-center"}`}>
             <PublicLanguageSwitch value={selectedLanguage} onChange={changePublicLanguage} size="nav" className="shrink-0" />
+            {mobileNavOpen && (
+              <nav className="grid w-[132px] shrink-0 grid-cols-2 gap-1 sm:hidden" aria-label={t("common.openMenu")}>
+                <button className={compactMobileNavButtonClass("dashboard")} onClick={() => { setView("dashboard"); setMobileNavOpen(false) }}>{t("nav.home")}</button>
+                <button className={compactMobileNavButtonClass("track-cases")} onClick={() => { setView("track-cases"); setMobileNavOpen(false) }}>{t("nav.track")}</button>
+                <button className="h-7 rounded-md bg-[#f8fafc] px-1 text-[10px] font-extrabold text-[#475569]" onClick={() => setMobileNavOpen(false)}>{t("nav.learn")}</button>
+                <button className={compactMobileNavButtonClass("support-locations")} onClick={() => { setView("support-locations"); setMobileNavOpen(false) }}>{t("nav.help")}</button>
+              </nav>
+            )}
           </div>
           <div className="col-start-2 row-start-1 flex min-w-0 items-center justify-end gap-1 sm:col-start-3 sm:gap-2 xl:col-start-3 xl:row-start-1">
             <PublicLanguageSwitch value={selectedLanguage} onChange={changePublicLanguage} size="nav" className="hidden shrink-0 xl:inline-flex" />
-            <button className="order-3 grid h-9 w-9 shrink-0 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#263747] xl:hidden" onClick={() => setMobileNavOpen((open) => !open)} title={t("common.openMenu")}>
+            <button className="order-3 grid h-9 w-9 shrink-0 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#263747] xl:hidden" onClick={() => setMobileNavOpen((open) => !open)} title={mobileNavOpen ? t("common.close") : t("common.openMenu")} aria-expanded={mobileNavOpen}>
               {mobileNavOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
             </button>
             {user && <div className="relative order-1 xl:order-none">
-              <button className="relative grid h-9 w-9 shrink-0 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#263747]" title={t("nav.notifications")} onClick={() => { setNotificationOpen((open) => !open); setUserMenuOpen(false) }}>
+              <button className="relative grid h-9 w-9 shrink-0 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#263747]" title={t("nav.notifications")} onClick={() => { setNotificationOpen((open) => !open); setUserMenuOpen(false); setMobileNavOpen(false) }}>
                 {notificationCount > 0 && <span className="absolute -right-1 -top-1 grid h-5 min-w-5 place-items-center rounded-full bg-[#ef5350] px-1 text-[11px] font-bold text-white">{notificationCount}</span>}
                 <Bell className="h-4 w-4" />
               </button>
@@ -4346,7 +4375,7 @@ function ExternalPortal({
             </div> : <button className="order-2 inline-flex h-9 items-center gap-2 rounded-md border border-[#d8dee8] bg-white px-3 text-sm font-semibold text-[#263747] xl:order-none" onClick={logout}><LogIn className="h-4 w-4" /> Sign in</button>}
           </div>
           {mobileNavOpen && (
-            <nav className="grid w-full grid-cols-2 gap-2 border-t border-[#edf0f4] pt-3 xl:hidden">
+            <nav className="col-span-3 hidden w-full grid-cols-4 gap-2 border-t border-[#edf0f4] pt-3 sm:grid xl:hidden">
               <button className={mobileNavButtonClass("dashboard")} onClick={() => { setView("dashboard"); setMobileNavOpen(false) }}>{t("nav.home")}</button>
               <button className={mobileNavButtonClass("track-cases")} onClick={() => { setView("track-cases"); setMobileNavOpen(false) }}>{t("nav.trackCase")}</button>
               <button className="h-10 rounded-lg bg-[#f8fafc] text-sm font-extrabold text-[#475569]" onClick={() => setMobileNavOpen(false)}>{t("nav.learn")}</button>
@@ -4372,7 +4401,7 @@ function ExternalPortal({
       <footer className="border-t border-[#dce6df] bg-white/85 px-4 py-4 text-[#52685d]">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-center gap-x-4 gap-y-1 text-center text-sm font-semibold sm:justify-between sm:text-left">
           <div className="font-extrabold text-[#0f172a]">National GRFM System</div>
-          <div>Ministry of Public Service, Labour and Social Welfare</div>
+          <div className="whitespace-nowrap text-[10px] sm:text-sm">Ministry of Public Service Labour and Social Welfare</div>
           <div>© 2026 Government of Zimbabwe</div>
         </div>
       </footer>
@@ -5113,12 +5142,12 @@ function AdminPortal({
   }
 
   return (
-    <main className="min-h-screen bg-[#0F172A] text-[14px] text-slate-300">
-      <div className="grid min-h-screen transition-[grid-template-columns] duration-200" style={{ gridTemplateColumns: sidebarCollapsed ? "76px minmax(0,1fr)" : "280px minmax(0,1fr)" }}>
+    <main className="h-screen overflow-hidden bg-[#0F172A] text-[14px] text-slate-300">
+      <div className="grid h-screen min-h-0 transition-[grid-template-columns] duration-200" style={{ gridTemplateColumns: sidebarCollapsed ? "76px minmax(0,1fr)" : "280px minmax(0,1fr)" }}>
         <InternalSideNav active={view} setActive={setView} user={user} collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} onLogout={logout} />
-        <div className="min-w-0">
+        <div className="flex min-h-0 min-w-0 flex-col">
           <InternalTopBar currentView={view} user={user} notifications={workflowNotifications} onOpenNotification={openWorkflowNotification} onViewAll={() => setView("notifications")} onLogout={logout} onProfile={() => setView("internal-profile")} />
-          <section className="min-w-0 space-y-4 p-4 sm:p-5">
+          <section className="min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
             {apiError && <ErrorBanner message={apiError} />}
             {view === "dashboard" && <InternalDashboard user={user} users={users} alerts={alerts} cases={cases} publicSubmissions={publicSubmissions} calendarTasks={calendarTasks} districts={districts} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} />}
             {view === "notifications" && <Notifications notifications={workflowNotifications} onOpenNotification={openWorkflowNotification} />}
@@ -16626,8 +16655,8 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle, onLogou
   const navSections = navSectionsBase.filter((section) => section.items.length && (isAdminUser || section.title !== "Administration"))
 
   return (
-    <aside className="flex min-h-full flex-col overflow-hidden border-r border-slate-800 bg-[#0B1220] text-slate-200 shadow-[10px_0_30px_rgba(2,6,23,0.24)]">
-      <div className={`flex min-h-[76px] items-center border-b border-slate-800 ${collapsed ? "justify-center px-2" : "justify-between px-4"}`}>
+    <aside className="flex h-full min-h-0 flex-col overflow-hidden border-r border-slate-800 bg-[#0B1220] text-slate-200 shadow-[10px_0_30px_rgba(2,6,23,0.24)]">
+      <div className={`flex min-h-[76px] shrink-0 items-center border-b border-slate-800 ${collapsed ? "justify-center px-2" : "justify-between px-4"}`}>
         {!collapsed && (
           <div className="flex min-w-0 items-center gap-3">
             <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-white/80 bg-white p-1.5 shadow-[0_10px_24px_rgba(2,6,23,0.28)] ring-1 ring-[#16A34A]/15">
@@ -16643,13 +16672,13 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle, onLogou
           <Menu className="h-5 w-5" />
         </button>
       </div>
-      {!collapsed && <div className="px-4 py-4">
+      {!collapsed && <div className="shrink-0 px-4 py-4">
         <label className="flex h-10 items-center rounded-lg border border-slate-700 bg-slate-900/70 text-slate-300">
           <Search className="ml-3 h-4 w-4 text-slate-500" />
           <input className="min-w-0 flex-1 bg-transparent px-3 text-sm font-semibold outline-none placeholder:text-slate-600" placeholder="Search operations..." />
         </label>
       </div>}
-      <nav className="flex-1 space-y-5 overflow-y-auto px-3 pb-4">
+      <nav className="app-sidebar-scroll min-h-0 flex-1 space-y-5 overflow-y-auto px-3 pb-4">
         {navSections.map((section, sectionIndex) => (
           <div key={`${section.title || "primary"}-${sectionIndex}`} className="space-y-1">
             {!collapsed && section.title && <div className="px-3 pb-1 text-[11px] font-extrabold uppercase tracking-[0.16em] text-slate-600">{section.title}</div>}
@@ -16666,7 +16695,7 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle, onLogou
           </div>
         ))}
       </nav>
-      <div className={`border-t border-slate-800 p-4 ${collapsed ? "text-center" : ""}`}>
+      <div className={`shrink-0 border-t border-slate-800 p-4 ${collapsed ? "text-center" : ""}`}>
         {!collapsed ? (
           <>
             <div className="text-sm font-extrabold text-white">{user.first_name || user.username}</div>
@@ -17895,7 +17924,7 @@ function PublicNotificationPopover({ alerts, onClose, onTrack }: { alerts: Alert
   return (
     <>
     <button className="fixed inset-0 z-40 cursor-default bg-transparent" aria-label="Close notifications" onClick={onClose} />
-    <div className="absolute right-0 top-11 z-50 w-[min(360px,calc(100vw-16px))] overflow-hidden rounded-xl border border-[#cfdbe8] bg-white text-[#10233f] shadow-[0_18px_45px_rgba(15,23,42,0.18)]">
+    <div className="fixed inset-x-2 top-[104px] z-50 w-auto overflow-hidden rounded-xl border border-[#cfdbe8] bg-white text-[#10233f] shadow-[0_18px_45px_rgba(15,23,42,0.18)] sm:absolute sm:inset-x-auto sm:right-0 sm:top-11 sm:w-[min(360px,calc(100vw-16px))]">
       <div className="flex items-start justify-between gap-3 border-b border-[#e5edf3] bg-[#f8fbfd] px-4 py-3">
         <div>
           <h3 className="text-sm font-extrabold">Notifications</h3>
@@ -17905,7 +17934,7 @@ function PublicNotificationPopover({ alerts, onClose, onTrack }: { alerts: Alert
           <X className="h-4 w-4" />
         </button>
       </div>
-      <div className="max-h-[360px] overflow-y-auto p-3">
+      <div className="max-h-[calc(100dvh-230px)] overflow-y-auto p-3 sm:max-h-[360px]">
         {orderedAlerts.length ? (
           <div className="space-y-2">
             {orderedAlerts.map((alert) => {
@@ -17931,7 +17960,7 @@ function PublicNotificationPopover({ alerts, onClose, onTrack }: { alerts: Alert
         )}
       </div>
       <div className="border-t border-[#e5edf3] bg-[#fbfdfc] px-3 py-3">
-        <button className="h-9 w-full rounded-lg bg-[#0e7a33] text-sm font-extrabold text-white hover:bg-[#0b5d2a]" onClick={onTrack}>View All Reports</button>
+        <button className="h-9 w-full rounded-lg bg-[#0e7a33] text-sm font-extrabold text-white hover:bg-[#0b5d2a]" onClick={onTrack}>View All Cases</button>
       </div>
     </div>
     </>

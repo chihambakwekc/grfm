@@ -84,6 +84,32 @@ td {
   background: #94a3b8;
 }
 
+.app-sidebar-scroll {
+  scrollbar-color: rgba(148, 163, 184, 0.46) transparent;
+  scrollbar-width: thin;
+  overscroll-behavior: contain;
+}
+
+.app-sidebar-scroll::-webkit-scrollbar {
+  width: 7px;
+}
+
+.app-sidebar-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.app-sidebar-scroll::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.34);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+.app-sidebar-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.58);
+  background-clip: padding-box;
+}
+
 .grfm-map-heartbeat-dot {
   transform-box: fill-box;
   transform-origin: center;
